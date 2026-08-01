@@ -1,0 +1,129 @@
+"""Unit tests for each temporal template's automaton, in isolation."""
+
+from __future__ import annotations
+
+from acel.temporal import (
+    at_most_n_times,
+    cannot_follow_without,
+    must_precede,
+    mutually_exclusive,
+    never_after,
+    required_before_session_end,
+)
+from acel.verdict import Verdict
+
+
+def run(contract, tools):
+    """Feed a list of tool names and return the final streaming verdict."""
+    verdict = contract.verdict
+    for tool in tools:
+        verdict = contract.on_event(tool)
+    return verdict
+
+
+# --- must_precede ------------------------------------------------------
+
+def test_must_precede_ok():
+    c = must_precede("validate", "delete")
+    assert run(c, ["validate", "delete", "delete"]) is not Verdict.VIOLATED
+
+
+def test_must_precede_violation():
+    c = must_precede("validate", "delete")
+    assert run(c, ["read", "delete"]) is Verdict.VIOLATED
+
+
+def test_must_precede_latches_violation():
+    c = must_precede("validate", "delete")
+    c.on_event("delete")  # violate immediately
+    assert c.on_event("validate") is Verdict.VIOLATED  # sticky
+
+
+# --- at_most_n_times ---------------------------------------------------
+
+def test_at_most_n_ok_at_limit():
+    c = at_most_n_times("send_payment", 1)
+    assert run(c, ["send_payment"]) is not Verdict.VIOLATED
+
+
+def test_at_most_n_violation_over_limit():
+    c = at_most_n_times("send_payment", 1)
+    assert run(c, ["send_payment", "send_payment"]) is Verdict.VIOLATED
+
+
+def test_at_most_zero_forbids():
+    c = at_most_n_times("delete", 0)
+    assert run(c, ["delete"]) is Verdict.VIOLATED
+
+
+# --- never_after -------------------------------------------------------
+
+def test_never_after_ok_before_marker():
+    c = never_after("read", "close")
+    assert run(c, ["read", "read", "close"]) is not Verdict.VIOLATED
+
+
+def test_never_after_violation():
+    c = never_after("read", "close")
+    assert run(c, ["close", "read"]) is Verdict.VIOLATED
+
+
+# --- required_before_session_end --------------------------------------
+
+def test_required_satisfied_when_seen():
+    c = required_before_session_end("commit")
+    run(c, ["work", "commit"])
+    assert c.on_session_end() is Verdict.SATISFIED
+
+
+def test_required_violated_when_missing():
+    c = required_before_session_end("commit")
+    run(c, ["work", "work"])
+    assert c.on_session_end() is Verdict.VIOLATED
+
+
+def test_required_unknown_midstream():
+    c = required_before_session_end("commit")
+    assert c.on_event("work") is Verdict.UNKNOWN
+
+
+# --- cannot_follow_without --------------------------------------------
+
+def test_cannot_follow_without_ok():
+    c = cannot_follow_without("delete", "backup")
+    assert run(c, ["backup", "delete"]) is not Verdict.VIOLATED
+
+
+def test_cannot_follow_without_violation():
+    c = cannot_follow_without("delete", "backup")
+    assert run(c, ["delete"]) is Verdict.VIOLATED
+
+
+def test_cannot_follow_without_is_dual_of_must_precede():
+    a = cannot_follow_without("delete", "backup")
+    b = must_precede("backup", "delete")
+    seq = ["delete", "backup", "delete"]
+    assert (run(a, seq) is Verdict.VIOLATED) == (run(b, seq) is Verdict.VIOLATED)
+
+
+# --- mutually_exclusive -----------------------------------------------
+
+def test_mutually_exclusive_ok_only_one():
+    c = mutually_exclusive("prod_write", "test_write")
+    assert run(c, ["prod_write", "prod_write"]) is not Verdict.VIOLATED
+
+
+def test_mutually_exclusive_violation():
+    c = mutually_exclusive("prod_write", "test_write")
+    assert run(c, ["prod_write", "test_write"]) is Verdict.VIOLATED
+
+
+# --- reset -------------------------------------------------------------
+
+def test_reset_clears_violation():
+    c = must_precede("validate", "delete")
+    c.on_event("delete")
+    assert c.verdict is Verdict.VIOLATED
+    c.reset()
+    assert c.verdict is Verdict.UNKNOWN
+    assert c.on_event("validate") is Verdict.SATISFIED
