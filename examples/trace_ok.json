@@ -1,0 +1,6 @@
+[
+  { "tool": "authenticate", "args": { "user": "p" }, "result": { "ok": true } },
+  { "tool": "validate_record", "args": { "id": "r1" } },
+  { "tool": "delete_record", "args": { "id": "r1" } },
+  { "tool": "send_payment", "args": { "amt": 10 } }
+]

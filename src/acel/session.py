@@ -14,12 +14,32 @@ from typing import Any, Callable, Iterable
 
 from .conditions import Check, Postcondition, Precondition, collect_checks, describe
 from .events import ToolCallEvent
+from .evidence import EvidenceLog, Signer
 from .state import StateStore
 from .temporal import TemporalContract
 from .verdict import Verdict
 from .violations import ContractViolation, Violation
 
 CommitFn = Callable[[StateStore, dict[str, Any], Any], None]
+
+
+@dataclass(frozen=True, slots=True)
+class Gate:
+    """The outcome of :meth:`Session.precheck`.
+
+    Carries the step index and normalized args back to the caller so a later
+    call to :meth:`Session.postcheck` can finalize the same call once its real
+    result is available — needed because, unlike :meth:`Session.call`, the
+    check and the execution happen on either side of an ``await`` boundary.
+    """
+
+    step: int
+    args: dict[str, Any]
+    violation: Violation | None
+
+    @property
+    def allowed(self) -> bool:
+        return self.violation is None
 
 
 @dataclass(slots=True)
@@ -54,10 +74,12 @@ class Session:
         state: dict[str, Any] | None = None,
         *,
         halt_on_violation: bool = True,
+        signer: Signer | None = None,
     ) -> None:
         self.state = StateStore(state)
         self.halt_on_violation = halt_on_violation
         self.violations: list[Violation] = []
+        self.evidence = EvidenceLog(signer=signer)
         self._contracts: list[TemporalContract] = []
         self._tools: dict[str, ToolSpec] = {}
         self._trace: list[dict[str, Any]] = []
@@ -160,6 +182,54 @@ class Session:
         self._trace.append({"step": step, "tool": tool, "args": args, "result": result})
         return result
 
+    # --- async/transport-facing gate (used by the MCP proxy middleware) --
+    def precheck(self, tool: str, args: dict[str, Any] | None = None) -> "Gate":
+        """Run the precondition + temporal gates for ``tool`` without executing it.
+
+        Unlike :meth:`call`, this never raises and never runs the tool — it is
+        meant for callers (like an async MCP middleware) that must decide
+        whether to forward a call *before* awaiting the real handler, then
+        finalize afterward with :meth:`postcheck` once a result exists.
+        """
+        args = dict(args or {})
+        self._step += 1
+        step = self._step
+        spec = self._tools.get(tool)
+
+        if spec is not None:
+            for check in spec.preconditions:
+                if not check.evaluate(self.state):
+                    v = self._record("precondition", check.description, tool, step, args, None)
+                    return Gate(step, args, v)
+
+        for contract in self._contracts:
+            if contract.on_event(tool) is Verdict.VIOLATED:
+                v = self._record("temporal", contract.spec, tool, step, args, None)
+                return Gate(step, args, v)
+
+        return Gate(step, args, None)
+
+    def postcheck(self, tool: str, gate: "Gate", result: Any) -> Violation | None:
+        """Finalize a call that passed :meth:`precheck`, given its real result.
+
+        Validates postconditions, commits the trusted result into state, and
+        records the call in the trace. Returns the Violation if a
+        postcondition failed (the result must then be treated as untrusted —
+        do not let it reach the agent), else None.
+        """
+        spec = self._tools.get(tool)
+        if spec is not None:
+            for check in spec.postconditions:
+                if not check.evaluate(self.state, result):
+                    return self._record(
+                        "postcondition", check.description, tool, gate.step, gate.args, result
+                    )
+            if spec.commit is not None:
+                spec.commit(self.state, gate.args, result)
+
+        self._trace.append({"step": gate.step, "tool": tool, "args": gate.args, "result": result})
+        return None
+
     def end_session(self) -> list[Violation]:
         """Finalize co-safety contracts (e.g. ``required_before_session_end``).
 
@@ -242,6 +312,7 @@ class Session:
             result=result,
         )
         self.violations.append(violation)
+        self.evidence.record(violation)
         return violation
 
     def _fail(

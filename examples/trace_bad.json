@@ -1,0 +1,5 @@
+[
+  { "tool": "delete_record", "args": { "id": "r1" } },
+  { "tool": "send_payment", "args": { "amt": 10 } },
+  { "tool": "send_payment", "args": { "amt": 20 } }
+]

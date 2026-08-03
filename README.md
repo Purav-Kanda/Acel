@@ -5,8 +5,9 @@ contracts and Hoare-style pre/postconditions in plain Python, and have them
 enforced live against the stream of tool calls an agent makes — halting the
 agent the moment a rule is broken.
 
-> This is `acel-core` (Phase 1): the transport-independent monitor. The MCP
-> proxy and signed, hash-chained evidence bundles build on top of it.
+> `acel-core` ships the transport-independent monitor (Phase 1) plus a live
+> MCP proxy (Phase 2): the same contracts enforced against a real MCP server,
+> via the official MCP Python SDK's request-middleware pipeline.
 
 This is **runtime verification** — checking each concrete execution against a
 specification as it happens. It does not prove the agent correct in general; it
@@ -110,11 +111,44 @@ violations = session.replay([
 ])
 ```
 
+## Live MCP proxy (Phase 2)
+
+ACEL can gate a **real** MCP server's tool calls, live, via the official MCP
+Python SDK's `ServerMiddleware` hook. Every `tools/call` request passes
+through ACEL's gate *before* the real tool handler runs — a blocked call has
+zero side effects.
+
+```bash
+pip install "acel-core[mcp]"
+```
+
+```python
+from mcp.server.mcpserver import MCPServer
+from acel import Session, must_precede
+from acel.mcp_middleware import ACELMiddleware
+
+session = Session()
+session.add_contract(must_precede("validate_record", "delete_record"))
+
+server = MCPServer("my-server", middleware=[ACELMiddleware(session)])
+
+@server.tool()
+def delete_record(record_id: str) -> dict: ...
+```
+
+See `examples/toy_server.py` for a complete toy server (5 tools, 3 contracts)
+and `tests/test_mcp_proxy.py` for an end-to-end demo: a real `ClientSession`
+talking to this server, with ACEL catching an ordering violation, a
+cardinality violation, and a state-precondition violation — each one halted
+before the tool it would have run.
+
 ## Tests
 
 ```bash
 pip install pytest
-pytest
+pytest                    # core monitor + evidence (no extra deps)
+pip install "acel-core[mcp]"
+pytest tests/test_mcp_proxy.py   # live MCP proxy integration test
 ```
 
 ## License
