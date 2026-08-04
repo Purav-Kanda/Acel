@@ -142,6 +142,20 @@ talking to this server, with ACEL catching an ordering violation, a
 cardinality violation, and a state-precondition violation — each one halted
 before the tool it would have run.
 
+## Correctness
+
+```bash
+python benchmarks/correctness.py
+```
+
+A labeled dataset of 51 synthetic tool-call traces spanning all 6 temporal
+templates (valid sequences, violating sequences, and edge cases like empty
+traces and multiple simultaneous contracts) — measured at **100% precision
+and 100% recall**. Since the monitor is deterministic automaton checking, not
+statistical detection, that's the expected result; the suite exists to prove
+it and to catch any future regression (it's also wired into `pytest` as
+`tests/test_correctness_suite.py`, so a miss fails CI directly).
+
 ## Performance
 
 ```bash
