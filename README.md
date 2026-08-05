@@ -210,6 +210,30 @@ file is just constructing an object from validated data, no code execution
 involved. Pre/postconditions stay in Python, wired directly to your tools —
 install YAML support with `pip install "acel-core[config]"`.
 
+## Verifying evidence for tampering
+
+Every violation is recorded as a tamper-evident, hash-chained bundle. Save
+one to disk and check it later — from a completely fresh process, with no
+in-memory state — with `acel verify`:
+
+```bash
+acel replay trace.json --rules rules.json --save-evidence evidence.json
+acel verify evidence.json
+```
+
+```
+OK — 3 bundle(s) verified. Hash chain is intact, no tampering detected.
+```
+
+If any field in any bundle was altered after the fact, `acel verify` fails
+and reports the exact bundle index where the chain first breaks — everything
+from that point onward is untrustworthy, but pinpointing *where* it broke is
+what actually helps you investigate:
+
+```
+FAIL — tampering detected. Bundle 1 (of 5) is the first to break the chain...
+```
+
 ## Correctness
 
 ```bash

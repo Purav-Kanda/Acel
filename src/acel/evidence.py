@@ -105,18 +105,31 @@ class EvidenceLog:
         Recomputes every hash from the payloads and checks the chain links.
         Any altered field anywhere in the history makes this return False.
         """
+        ok, _ = EvidenceLog.verify_bundles_detailed(bundles)
+        return ok
+
+    @staticmethod
+    def verify_bundles_detailed(bundles: list[dict[str, Any]]) -> tuple[bool, int | None]:
+        """Like :meth:`verify_bundles`, but also reports *where* the chain broke.
+
+        Returns ``(True, None)`` if every bundle checks out, or ``(False, i)``
+        where ``i`` is the index of the first bundle that fails to verify —
+        because the chain is cumulative, everything after that point is
+        untrustworthy too, but the *first* break is what tells you where the
+        tampering (or corruption) actually happened.
+        """
         prev = GENESIS_HASH
-        for bundle in bundles:
+        for i, bundle in enumerate(bundles):
             payload = _payload_of(bundle["index"], bundle["timestamp"], bundle["violation"])
             trace_hash = _sha256_hex(_canonical(payload))
             if trace_hash != bundle["trace_hash"]:
-                return False
+                return False, i
             if bundle["prev_hash"] != prev:
-                return False
+                return False, i
             if _sha256_hex((prev + trace_hash).encode()) != bundle["bundle_hash"]:
-                return False
+                return False, i
             prev = bundle["bundle_hash"]
-        return True
+        return True, None
 
 
 def ed25519_signer() -> tuple[Signer, str]:

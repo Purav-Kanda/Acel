@@ -1,6 +1,6 @@
 """The ``acel`` command-line interface.
 
-Ships four commands:
+Ships five commands:
 
 - ``acel replay`` — check a recorded tool-call trace against a set of
   temporal contracts, offline. Intended for CI: exits non-zero if any
@@ -8,6 +8,10 @@ Ships four commands:
 - ``acel validate`` — parse a rules file (JSON or YAML) and print the
   contracts it declares, without running anything. A quick sanity check
   before wiring a rules file into ``replay`` or ``serve``.
+- ``acel verify`` — check a saved evidence-log JSON file (e.g. from
+  ``replay --evidence --save-evidence``) for tampering, by recomputing its
+  hash chain from scratch. Reports exactly which bundle broke the chain, if
+  any did.
 - ``acel serve`` — run a live MCP server with ACEL enforcement wired in,
   over stdio. Contracts can come from your server module's own
   ``build_server()`` function (see ``examples/toy_server.py``) and/or from a
@@ -31,6 +35,7 @@ from types import ModuleType
 from typing import Any
 
 from . import config as config_mod
+from .evidence import EvidenceLog
 from .session import Session
 
 
@@ -56,6 +61,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
     violations = session.replay(trace)
 
+    if args.save_evidence:
+        Path(args.save_evidence).write_text(session.evidence.to_json(), encoding="utf-8")
+        print(f"Evidence log written to {args.save_evidence!r}.", file=sys.stderr)
+
     if not violations:
         print(f"OK  — {len(trace)} events checked, no violations.")
         return 0
@@ -66,6 +75,45 @@ def cmd_replay(args: argparse.Namespace) -> int:
     if args.evidence:
         print("\nEvidence bundle:")
         print(session.evidence.to_json())
+    return 1
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    try:
+        bundles = _load_json(args.evidence_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"error: could not read {args.evidence_file!r}: {exc}", file=sys.stderr)
+        return 2
+
+    if not isinstance(bundles, list):
+        print(f"error: {args.evidence_file!r} must contain a JSON list of evidence bundles", file=sys.stderr)
+        return 2
+
+    if not bundles:
+        print(f"OK — {args.evidence_file} contains 0 bundles (nothing to verify).")
+        return 0
+
+    try:
+        ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles)
+    except (KeyError, TypeError) as exc:
+        print(
+            f"error: {args.evidence_file!r} doesn't look like a valid evidence log "
+            f"(missing or malformed field: {exc})",
+            file=sys.stderr,
+        )
+        return 2
+
+    if ok:
+        print(f"OK — {len(bundles)} bundle(s) verified. Hash chain is intact, no tampering detected.")
+        return 0
+
+    print(
+        f"FAIL — tampering detected. Bundle {bad_index} (of {len(bundles)}) is the first to "
+        f"break the chain — its hash doesn't match its own recomputed content, or it doesn't "
+        f"link to the previous bundle correctly. Everything from bundle {bad_index} onward "
+        f"cannot be trusted.",
+        file=sys.stderr,
+    )
     return 1
 
 
@@ -225,7 +273,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the hash-chained evidence bundle for any violations.",
     )
+    replay.add_argument(
+        "--save-evidence",
+        metavar="PATH",
+        help="Write the hash-chained evidence log to PATH as JSON, regardless of outcome "
+        "(pass this file to `acel verify` later to check it hasn't been tampered with).",
+    )
     replay.set_defaults(func=cmd_replay)
+
+    verify = sub.add_parser(
+        "verify", help="Check a saved evidence-log JSON file for tampering."
+    )
+    verify.add_argument(
+        "evidence_file", help="Path to a JSON file containing a list of evidence bundles."
+    )
+    verify.set_defaults(func=cmd_verify)
 
     validate = sub.add_parser(
         "validate", help="Parse a rules file and print the contracts it declares."

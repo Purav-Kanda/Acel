@@ -85,3 +85,40 @@ def test_to_json_round_trips_through_verify():
     log.record(_violation(2))
     loaded = json.loads(log.to_json())
     assert EvidenceLog.verify_bundles(loaded) is True
+
+
+def test_verify_bundles_detailed_reports_no_break_on_clean_chain():
+    log = EvidenceLog()
+    log.record(_violation(1))
+    log.record(_violation(2))
+    bundles = [b.to_dict() for b in log.bundles]
+    ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles)
+    assert ok is True
+    assert bad_index is None
+
+
+def test_verify_bundles_detailed_pinpoints_first_tampered_bundle():
+    log = EvidenceLog()
+    log.record(_violation(1))
+    log.record(_violation(2))
+    log.record(_violation(3))
+    bundles = [b.to_dict() for b in log.bundles]
+    tampered = copy.deepcopy(bundles)
+    tampered[1]["violation"]["spec"] = "tampered"
+    ok, bad_index = EvidenceLog.verify_bundles_detailed(tampered)
+    assert ok is False
+    assert bad_index == 1  # the middle bundle, not the last one it corrupts too
+
+
+def test_verify_bundles_detailed_reports_first_break_not_last():
+    """Tampering with an early bundle breaks every bundle after it too — make
+    sure the reported index is the *first* break, not the last."""
+    log = EvidenceLog()
+    for i in range(5):
+        log.record(_violation(i))
+    bundles = [b.to_dict() for b in log.bundles]
+    tampered = copy.deepcopy(bundles)
+    tampered[1]["violation"]["spec"] = "tampered"
+    ok, bad_index = EvidenceLog.verify_bundles_detailed(tampered)
+    assert ok is False
+    assert bad_index == 1
