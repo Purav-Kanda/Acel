@@ -3,9 +3,9 @@ correctness: does the monitor catch every violation (recall) and only real
 violations (precision)?
 
 Each Case wires one or more temporal contracts to a trace and states whether
-that trace *should* trigger a violation. Covers all 6 templates with both
+that trace *should* trigger a violation. Covers all 7 templates with both
 passing and violating sequences, plus a few edge cases and multi-contract
-combinations — 51 cases total.
+combinations — 59 cases total.
 """
 
 from __future__ import annotations
@@ -25,6 +25,10 @@ class Case:
 
 def _t(tool: str) -> dict[str, Any]:
     return {"tool": tool}
+
+
+def _ta(tool: str, **args: Any) -> dict[str, Any]:
+    return {"tool": tool, "args": args}
 
 
 CASES: list[Case] = [
@@ -79,6 +83,32 @@ CASES: list[Case] = [
     Case("at_most_n_08_valid_interleaved", "at_most_n_times",
          [{"template": "at_most_n_times", "args": ["pay"], "kwargs": {"n": 2}}],
          [_t("pay"), _t("other"), _t("pay")], False),
+
+    # --- at_most_total(send_payment, amount, limit=100) -------------------
+    Case("at_most_total_01_valid_under_limit", "at_most_total",
+         [{"template": "at_most_total", "args": ["send_payment", "amount"], "kwargs": {"limit": 100}}],
+         [_ta("send_payment", amount=40), _ta("send_payment", amount=30)], False),
+    Case("at_most_total_02_valid_exactly_at_limit", "at_most_total",
+         [{"template": "at_most_total", "args": ["send_payment", "amount"], "kwargs": {"limit": 100}}],
+         [_ta("send_payment", amount=60), _ta("send_payment", amount=40)], False),
+    Case("at_most_total_03_violation_over_limit", "at_most_total",
+         [{"template": "at_most_total", "args": ["send_payment", "amount"], "kwargs": {"limit": 100}}],
+         [_ta("send_payment", amount=60), _ta("send_payment", amount=41)], True),
+    Case("at_most_total_04_violation_single_call_over_limit", "at_most_total",
+         [{"template": "at_most_total", "args": ["send_payment", "amount"], "kwargs": {"limit": 100}}],
+         [_ta("send_payment", amount=150)], True),
+    Case("at_most_total_05_valid_ignores_other_tools", "at_most_total",
+         [{"template": "at_most_total", "args": ["send_payment", "amount"], "kwargs": {"limit": 100}}],
+         [_ta("other_tool", amount=99999), _ta("send_payment", amount=10)], False),
+    Case("at_most_total_06_violation_missing_field", "at_most_total",
+         [{"template": "at_most_total", "args": ["send_payment", "amount"], "kwargs": {"limit": 100}}],
+         [_t("send_payment")], True),
+    Case("at_most_total_07_violation_non_numeric_field", "at_most_total",
+         [{"template": "at_most_total", "args": ["send_payment", "amount"], "kwargs": {"limit": 100}}],
+         [_ta("send_payment", amount="a lot")], True),
+    Case("at_most_total_08_valid_zero_calls", "at_most_total",
+         [{"template": "at_most_total", "args": ["send_payment", "amount"], "kwargs": {"limit": 100}}],
+         [], False),
 
     # --- never_after(read, close) ----------------------------------------
     Case("never_after_01_valid_all_before", "never_after",

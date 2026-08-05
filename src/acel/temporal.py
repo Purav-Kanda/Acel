@@ -9,6 +9,8 @@ Semantics summary (``a``, ``b`` are tool names):
 
 - ``must_precede(a, b)``            every ``b`` must be preceded by some ``a``.
 - ``at_most_n_times(a, n)``         ``a`` occurs at most ``n`` times per session.
+- ``at_most_total(a, field, limit)``the sum of ``args[field]`` across all calls
+                                     to ``a`` must not exceed ``limit``.
 - ``never_after(a, b)``             ``a`` must never occur after ``b`` has occurred.
 - ``required_before_session_end(a)````a`` must occur at least once before the session ends.
 - ``cannot_follow_without(a, b)``   ``a`` may not occur unless ``b`` occurred earlier
@@ -19,6 +21,7 @@ Semantics summary (``a``, ``b`` are tool names):
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from .verdict import Verdict
 
@@ -39,11 +42,19 @@ class TemporalContract(ABC):
     def verdict(self) -> Verdict:
         return self._verdict
 
-    def on_event(self, tool: str) -> Verdict:
-        """Advance the automaton by one tool call and return the new verdict."""
+    def on_event(self, tool: str, args: dict[str, Any] | None = None) -> Verdict:
+        """Advance the automaton by one tool call and return the new verdict.
+
+        ``args`` is optional and ``None`` by default — most templates only
+        care about the tool *name* (ordering/cardinality rules). It exists
+        for templates like :class:`CumulativeLimit` that need to read a
+        numeric field out of the call's arguments (e.g. summing a payment
+        amount); those templates receive ``{}`` rather than ``None`` if the
+        caller omits args, so ``.get(...)`` is always safe to call on it.
+        """
         if self._verdict is Verdict.VIOLATED:
             return Verdict.VIOLATED
-        self._verdict = self._step(tool)
+        self._verdict = self._step(tool, args or {})
         return self._verdict
 
     def on_session_end(self) -> Verdict:
@@ -60,7 +71,7 @@ class TemporalContract(ABC):
 
     # --- subclass hooks -------------------------------------------------
     @abstractmethod
-    def _step(self, tool: str) -> Verdict: ...
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict: ...
 
     def _finalize(self) -> Verdict:
         return self._verdict
@@ -81,7 +92,7 @@ class MustPrecede(TemporalContract):
         self.later = later
         self._seen_earlier = False
 
-    def _step(self, tool: str) -> Verdict:
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
         if tool == self.earlier:
             self._seen_earlier = True
             return Verdict.SATISFIED
@@ -107,7 +118,7 @@ class AtMostNTimes(TemporalContract):
         self.n = n
         self._count = 0
 
-    def _step(self, tool: str) -> Verdict:
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
         if tool == self.tool:
             self._count += 1
             if self._count > self.n:
@@ -127,7 +138,7 @@ class NeverAfter(TemporalContract):
         self.b = b
         self._seen_b = False
 
-    def _step(self, tool: str) -> Verdict:
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
         if tool == self.b:
             self._seen_b = True
         if tool == self.a and self._seen_b:
@@ -146,7 +157,7 @@ class RequiredBeforeSessionEnd(TemporalContract):
         self.tool = tool
         self._seen = False
 
-    def _step(self, tool: str) -> Verdict:
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
         if tool == self.tool:
             self._seen = True
             return Verdict.SATISFIED
@@ -173,7 +184,7 @@ class CannotFollowWithout(TemporalContract):
         self.prerequisite = prerequisite
         self._seen_prereq = False
 
-    def _step(self, tool: str) -> Verdict:
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
         if tool == self.prerequisite:
             self._seen_prereq = True
         if tool == self.action and not self._seen_prereq:
@@ -197,7 +208,7 @@ class MutuallyExclusive(TemporalContract):
         self._seen_a = False
         self._seen_b = False
 
-    def _step(self, tool: str) -> Verdict:
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
         if tool == self.a:
             self._seen_a = True
         elif tool == self.b:
@@ -211,6 +222,53 @@ class MutuallyExclusive(TemporalContract):
         self._seen_b = False
 
 
+class CumulativeLimit(TemporalContract):
+    """The sum of ``args[field]`` across every call to ``tool`` must not
+    exceed ``limit`` (e.g. "total refunds this session must not exceed $500").
+
+    Unlike the other templates, this one reads the call's *arguments*, not
+    just its name — it's checked before the call executes (same as every
+    other temporal contract), using the amount the call is *about to* commit,
+    so a call that would push the running total over the limit is blocked
+    before it happens, not after.
+
+    Fails closed: if ``field`` is missing from a matching call's arguments,
+    or isn't numeric, that call is treated as a violation rather than
+    silently passed through — for a contract whose whole purpose is
+    capping spend, silently ignoring an unreadable amount would be the one
+    genuinely dangerous failure mode.
+    """
+
+    def __init__(self, tool: str, field: str, limit: float) -> None:
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        super().__init__(f"at_most_total({tool}, {field}, limit={limit})")
+        self.tool = tool
+        self.field = field
+        self.limit = limit
+        self._total: float = 0.0
+
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
+        if tool != self.tool:
+            return Verdict.UNKNOWN if self._total == 0 else Verdict.SATISFIED
+
+        value = args.get(self.field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return Verdict.VIOLATED  # unreadable amount — fail closed, not silently allow
+
+        candidate = self._total + value
+        if candidate > self.limit:
+            return Verdict.VIOLATED
+        self._total = candidate
+        return Verdict.SATISFIED
+
+    def _finalize(self) -> Verdict:
+        return Verdict.SATISFIED if self._total > 0 else Verdict.UNKNOWN
+
+    def _reset(self) -> None:
+        self._total = 0.0
+
+
 # --- public factory functions (the named-template DSL) -----------------
 
 def must_precede(earlier: str, later: str) -> MustPrecede:
@@ -219,6 +277,10 @@ def must_precede(earlier: str, later: str) -> MustPrecede:
 
 def at_most_n_times(tool: str, n: int) -> AtMostNTimes:
     return AtMostNTimes(tool, n)
+
+
+def at_most_total(tool: str, field: str, limit: float) -> CumulativeLimit:
+    return CumulativeLimit(tool, field, limit)
 
 
 def never_after(a: str, b: str) -> NeverAfter:

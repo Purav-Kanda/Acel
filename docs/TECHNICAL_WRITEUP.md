@@ -51,9 +51,9 @@ Ordering rules over an event stream are naturally expressed in linear temporal l
 
 This three-valued model is exactly the right fit for the agent-monitoring setting: most of ACEL's rules are *safety properties* ("a bad prefix, once it happens, can never be fixed"), which is the class LTL3 monitoring was designed for, and the `UNKNOWN` verdict is what lets ACEL say "no violation detected yet" without falsely claiming the rule is proven satisfied for a session still in progress.
 
-### 3.2 Six named templates, not raw temporal logic
+### 3.2 Seven named templates, not raw temporal logic
 
-Nobody writing agent tools wants to write LTL formulas. ACEL exposes six named templates — `must_precede`, `at_most_n_times`, `never_after`, `required_before_session_end`, `cannot_follow_without`, `mutually_exclusive` — each a small hand-written deterministic automaton implementing one common ordering pattern. A user composes these declaratively:
+Nobody writing agent tools wants to write LTL formulas. ACEL exposes seven named templates — `must_precede`, `at_most_n_times`, `at_most_total`, `never_after`, `required_before_session_end`, `cannot_follow_without`, `mutually_exclusive` — each a small hand-written deterministic automaton implementing one common ordering pattern. Six of the seven only ever look at the tool *name*; `at_most_total` is the exception — it sums a numeric field out of the call's arguments (e.g. a payment amount) across the session, for rules like "total refunds this session must not exceed $500," and fails closed (treats a missing or non-numeric field as a violation) rather than silently letting an unreadable amount through. A user composes these declaratively:
 
 ```python
 session.add_contract(must_precede("validate_record", "delete_record"))
@@ -123,7 +123,7 @@ Ed25519 signing is layered on top as a strictly optional extra (`ed25519_signer(
 
 ## 7. Correctness and performance: measured, not asserted
 
-**Correctness.** A labeled dataset of 51 synthetic tool-call traces spans all six temporal templates: valid sequences, violating sequences, and edge cases (empty traces, multiple simultaneous contracts, boundary counts for `at_most_n_times`). Measured result: **100% precision and 100% recall** (`benchmarks/correctness.py`, wired into CI as `tests/test_correctness_suite.py`). This number is expected, not impressive on its own — the monitor is a deterministic automaton over an explicit trace, not a statistical classifier, so a correctly implemented automaton *should* score 100% on a labeled set of well-formed cases. The suite's actual value is as a regression gate: any future change to a template's `_step` logic that breaks a case fails CI immediately, and the 100% is what "not broken" looks like on this dataset.
+**Correctness.** A labeled dataset of 59 synthetic tool-call traces spans all seven temporal templates: valid sequences, violating sequences, and edge cases (empty traces, multiple simultaneous contracts, boundary counts for `at_most_n_times`, missing/non-numeric fields for `at_most_total`). Measured result: **100% precision and 100% recall** (`benchmarks/correctness.py`, wired into CI as `tests/test_correctness_suite.py`). This number is expected, not impressive on its own — the monitor is a deterministic automaton over an explicit trace, not a statistical classifier, so a correctly implemented automaton *should* score 100% on a labeled set of well-formed cases. The suite's actual value is as a regression gate: any future change to a template's `_step` logic that breaks a case fails CI immediately, and the 100% is what "not broken" looks like on this dataset.
 
 **Performance.** `benchmarks/latency.py` measures added p95 latency per tool call, 20,000 iterations, discarding a 1,000-call warmup, on the reference dev machine: **~0.005ms at 1 active contract**, **~0.04ms at 50 concurrently active contracts** — both well under a <5ms target for anything sitting in a live request path. This scaling is a direct consequence of the O(1)-per-contract design in §3.3: cost is linear in the number of *active* contracts, flat with respect to how long the session has been running.
 
@@ -134,7 +134,7 @@ Ed25519 signing is layered on top as a strictly optional extra (`ed25519_signer(
 ## 8. What this doesn't do (scope, honestly stated)
 
 - **It doesn't detect semantic wrongness.** ACEL doesn't know that a `send_payment` amount is unreasonable, or that a generated SQL query is subtly wrong — it knows only what you've encoded as a contract or a state precondition. It's a specification-conformance checker, not a general correctness oracle.
-- **It doesn't reason about arbitrary LTL formulas.** The six templates cover the common ordering patterns; a rule that doesn't fit one of them (or a conjunction of them) isn't expressible without writing a new `TemporalContract` subclass. This is a deliberate scope cut, not an oversight — a general temporal-logic parser was cut early to ship a correct, well-tested core in the time available, and the six templates were chosen because they cover the overwhelming majority of real "X before Y" / "at most N" / "never both" agent rules.
+- **It doesn't reason about arbitrary LTL formulas.** The seven templates cover the common ordering and cumulative-limit patterns; a rule that doesn't fit one of them (or a conjunction of them) isn't expressible without writing a new `TemporalContract` subclass. This is a deliberate scope cut, not an oversight — a general temporal-logic parser was cut early to ship a correct, well-tested core in the time available, and the templates were chosen because they cover the overwhelming majority of real "X before Y" / "at most N" / "at most $N total" / "never both" agent rules.
 - **It only guards tools it fronts.** In MCP-proxy mode, ACEL gates the tools exposed through *your* server. It cannot wrap a first-party connector run on someone else's infrastructure (e.g. a hosted connector's internals) — only tools you actually expose and route through the middleware.
 - **The state store trusts its own commits.** If a `commit` lambda is written to pull from unverified input rather than the verified tool result, the "trusted world" guarantee is only as good as that lambda. ACEL enforces the *mechanism* (state only changes through explicit commits, never through the current call's raw arguments); it can't stop a user from writing a careless commit function.
 
@@ -142,7 +142,7 @@ Ed25519 signing is layered on top as a strictly optional extra (`ed25519_signer(
 
 ## 9. Summary
 
-ACEL is a small, fully-tested (119 passing tests, including a live end-to-end run against the real MCP SDK and a real subprocess) runtime verification layer with three independently useful pieces: O(1)-per-event temporal automata grounded in LTL3's three-valued finite-trace semantics, Hoare-style pre/postconditions over a trusted symbolic state store, and a tamper-evident hash-chained evidence log — wired into a live MCP proxy that halts a violating call before it ever reaches the real tool. It is MIT-licensed, self-hosted, and published on PyPI as `acel-core`.
+ACEL is a small, fully-tested (167 passing tests, including a live end-to-end run against the real MCP SDK and a real subprocess) runtime verification layer with three independently useful pieces: O(1)-per-event temporal automata grounded in LTL3's three-valued finite-trace semantics, Hoare-style pre/postconditions over a trusted symbolic state store, and a tamper-evident hash-chained evidence log — wired into a live MCP proxy that halts a violating call before it ever reaches the real tool. It is MIT-licensed, self-hosted, and published on PyPI as `acel-core`.
 
 ### References
 

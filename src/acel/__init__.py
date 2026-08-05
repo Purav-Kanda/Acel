@@ -18,6 +18,7 @@ from .state import StateStore
 from .temporal import (
     TemporalContract,
     at_most_n_times,
+    at_most_total,
     cannot_follow_without,
     must_precede,
     mutually_exclusive,
@@ -27,7 +28,7 @@ from .temporal import (
 from .verdict import Verdict
 from .violations import ContractViolation, Violation
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "__version__",
@@ -52,6 +53,7 @@ __all__ = [
     "TemporalContract",
     "must_precede",
     "at_most_n_times",
+    "at_most_total",
     "never_after",
     "required_before_session_end",
     "cannot_follow_without",

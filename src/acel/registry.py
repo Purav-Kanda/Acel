@@ -12,6 +12,7 @@ from typing import Any
 from .temporal import (
     TemporalContract,
     at_most_n_times,
+    at_most_total,
     cannot_follow_without,
     must_precede,
     mutually_exclusive,
@@ -22,6 +23,7 @@ from .temporal import (
 TEMPLATES = {
     "must_precede": must_precede,
     "at_most_n_times": at_most_n_times,
+    "at_most_total": at_most_total,
     "never_after": never_after,
     "required_before_session_end": required_before_session_end,
     "cannot_follow_without": cannot_follow_without,

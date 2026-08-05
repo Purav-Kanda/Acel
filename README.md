@@ -71,12 +71,13 @@ except ContractViolation as exc:
     print(v.state_snapshot)  # symbolic state at the moment it broke
 ```
 
-## The six temporal templates
+## The seven temporal templates
 
 | Template | Meaning |
 | --- | --- |
 | `must_precede(a, b)` | every `b` must be preceded by some `a` |
 | `at_most_n_times(a, n)` | `a` occurs at most `n` times per session |
+| `at_most_total(a, field, limit)` | the sum of `args[field]` across all calls to `a` must not exceed `limit` |
 | `never_after(a, b)` | `a` must never occur after `b` |
 | `required_before_session_end(a)` | `a` must occur at least once before the session ends |
 | `cannot_follow_without(a, b)` | `a` may not occur unless `b` occurred earlier |
@@ -84,7 +85,23 @@ except ContractViolation as exc:
 
 Each template is a deterministic automaton advanced in O(1) per tool call, with
 a three-valued verdict (`SATISFIED` / `VIOLATED` / `UNKNOWN`) over the finite
-trace.
+trace. `at_most_total` is the odd one out — it's the only template that reads
+call *arguments* rather than just the tool name, since it has to sum a
+numeric field (e.g. a payment amount) across calls. It fails closed: a call
+missing the field, or with a non-numeric value there, is treated as a
+violation rather than silently let through — for a contract whose whole
+purpose is capping spend, silently ignoring an unreadable amount would be the
+actually dangerous failure mode.
+
+```python
+from acel import Session, at_most_total
+
+session = Session()
+session.add_contract(at_most_total("send_payment", "amount", limit=500))
+
+session.call("send_payment", {"amount": 300}, result={"sent": True})
+session.call("send_payment", {"amount": 250}, result={"sent": True})  # raises: 550 > 500
+```
 
 ## Pre/postconditions with decorators
 
@@ -234,13 +251,36 @@ what actually helps you investigate:
 FAIL — tampering detected. Bundle 1 (of 5) is the first to break the chain...
 ```
 
+## Security notes
+
+- **Evidence bundles embed full call arguments, results, and state
+  snapshots.** That's what makes them useful evidence, but it also means
+  anything sensitive passed as a tool argument (a password, a raw token, a
+  secret) ends up persisted verbatim if you save an evidence log to disk or
+  share it. ACEL doesn't redact argument values — it has no way to know which
+  fields are sensitive without you telling it. Keep secrets out of tool
+  *arguments* entirely; pass a reference/ID instead and resolve the real
+  secret inside your own tool implementation.
+- **`ed25519_signer()` generates a fresh, unpersisted key every call.** Only
+  the public key comes back — the private key never leaves memory and isn't
+  saved anywhere. That's fine for signing within one process's lifetime, but
+  restart the process (or call it again) and old signatures are no longer
+  verifiable against the new public key. If you need signatures that stay
+  verifiable across restarts, generate and store your own long-lived Ed25519
+  keypair rather than relying on this convenience function.
+- **Config files (`--rules`, `--contracts`) are parsed with `yaml.safe_load`
+  and `json.loads` only** — never `yaml.load` or `eval`. There is no code
+  execution path from a rules file; that's exactly why pre/postconditions
+  can't be declared there (see above) — only tool names, counts, and plain
+  values are ever deserialized.
+
 ## Correctness
 
 ```bash
 python benchmarks/correctness.py
 ```
 
-A labeled dataset of 51 synthetic tool-call traces spanning all 6 temporal
+A labeled dataset of 59 synthetic tool-call traces spanning all 7 temporal
 templates (valid sequences, violating sequences, and edge cases like empty
 traces and multiple simultaneous contracts) — measured at **100% precision
 and 100% recall**. Since the monitor is deterministic automaton checking, not
@@ -269,6 +309,16 @@ pytest                    # core monitor + evidence (no extra deps)
 pip install "acel-core[mcp]"
 pytest tests/test_mcp_proxy.py tests/test_cli_serve.py   # live MCP proxy + CLI
 ```
+
+## Testing against a real agent, not a script
+
+Everything above proves ACEL works against scripted tool calls. For the
+stronger version — a real LLM in Claude Desktop or Claude Code actually
+driving the tool calls, and ACEL blocking a mistake the model made itself —
+see [`docs/TESTING_WITH_REAL_AGENTS.md`](docs/TESTING_WITH_REAL_AGENTS.md).
+It walks through wiring up `examples/support_agent_server.py` (a realistic
+customer-support/refund scenario) and gives adversarial prompts designed to
+actually trigger each contract.
 
 ## License
 

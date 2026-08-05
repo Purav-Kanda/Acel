@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from acel.temporal import (
     at_most_n_times,
+    at_most_total,
     cannot_follow_without,
     must_precede,
     mutually_exclusive,
@@ -18,6 +21,14 @@ def run(contract, tools):
     verdict = contract.verdict
     for tool in tools:
         verdict = contract.on_event(tool)
+    return verdict
+
+
+def run_calls(contract, calls):
+    """Feed a list of (tool, args) pairs and return the final streaming verdict."""
+    verdict = contract.verdict
+    for tool, args in calls:
+        verdict = contract.on_event(tool, args)
     return verdict
 
 
@@ -54,6 +65,71 @@ def test_at_most_n_violation_over_limit():
 def test_at_most_zero_forbids():
     c = at_most_n_times("delete", 0)
     assert run(c, ["delete"]) is Verdict.VIOLATED
+
+
+# --- at_most_total ------------------------------------------------------
+
+def test_at_most_total_ok_under_limit():
+    c = at_most_total("send_payment", "amount", 100)
+    calls = [("send_payment", {"amount": 40}), ("send_payment", {"amount": 30})]
+    assert run_calls(c, calls) is not Verdict.VIOLATED
+
+
+def test_at_most_total_ok_exactly_at_limit():
+    c = at_most_total("send_payment", "amount", 100)
+    calls = [("send_payment", {"amount": 60}), ("send_payment", {"amount": 40})]
+    assert run_calls(c, calls) is not Verdict.VIOLATED
+
+
+def test_at_most_total_violation_over_limit():
+    c = at_most_total("send_payment", "amount", 100)
+    calls = [("send_payment", {"amount": 60}), ("send_payment", {"amount": 41})]
+    assert run_calls(c, calls) is Verdict.VIOLATED
+
+
+def test_at_most_total_violation_single_call_over_limit():
+    c = at_most_total("send_payment", "amount", 100)
+    assert run_calls(c, [("send_payment", {"amount": 150})]) is Verdict.VIOLATED
+
+
+def test_at_most_total_ignores_other_tools():
+    c = at_most_total("send_payment", "amount", 100)
+    calls = [("other_tool", {"amount": 99999}), ("send_payment", {"amount": 10})]
+    assert run_calls(c, calls) is not Verdict.VIOLATED
+
+
+def test_at_most_total_fails_closed_on_missing_field():
+    c = at_most_total("send_payment", "amount", 100)
+    assert run_calls(c, [("send_payment", {})]) is Verdict.VIOLATED
+
+
+def test_at_most_total_fails_closed_on_non_numeric_field():
+    c = at_most_total("send_payment", "amount", 100)
+    assert run_calls(c, [("send_payment", {"amount": "a lot"})]) is Verdict.VIOLATED
+
+
+def test_at_most_total_fails_closed_on_bool_field():
+    """bool is a subclass of int in Python — must not silently count as 0/1."""
+    c = at_most_total("send_payment", "amount", 100)
+    assert run_calls(c, [("send_payment", {"amount": True})]) is Verdict.VIOLATED
+
+
+def test_at_most_total_latches_violation():
+    c = at_most_total("send_payment", "amount", 100)
+    c.on_event("send_payment", {"amount": 150})
+    assert c.on_event("send_payment", {"amount": 1}) is Verdict.VIOLATED
+
+
+def test_at_most_total_negative_limit_rejected():
+    with pytest.raises(ValueError, match="non-negative"):
+        at_most_total("send_payment", "amount", -1)
+
+
+def test_at_most_total_reset_clears_running_total():
+    c = at_most_total("send_payment", "amount", 100)
+    c.on_event("send_payment", {"amount": 90})
+    c.reset()
+    assert c.on_event("send_payment", {"amount": 90}) is not Verdict.VIOLATED
 
 
 # --- never_after -------------------------------------------------------

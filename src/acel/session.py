@@ -193,7 +193,7 @@ class Session:
         # 2. Temporal ordering: the call must be legal in this sequence.
         if blocking_violation is None:
             for contract in self._contracts:
-                if contract.on_event(tool) is Verdict.VIOLATED:
+                if contract.on_event(tool, args) is Verdict.VIOLATED:
                     blocking_violation = self._record(
                         "temporal", contract.spec, tool, step, args, None
                     )
@@ -252,7 +252,7 @@ class Session:
                     return Gate(step, args, v, blocking=enforcing)
 
         for contract in self._contracts:
-            if contract.on_event(tool) is Verdict.VIOLATED:
+            if contract.on_event(tool, args) is Verdict.VIOLATED:
                 v = self._record("temporal", contract.spec, tool, step, args, None)
                 return Gate(step, args, v, blocking=enforcing)
 
@@ -328,7 +328,7 @@ class Session:
             temporal_failed = False
             for contract in self._contracts:
                 already = contract.verdict is Verdict.VIOLATED
-                if contract.on_event(event.tool) is Verdict.VIOLATED and not already:
+                if contract.on_event(event.tool, args) is Verdict.VIOLATED and not already:
                     found.append(self._record("temporal", contract.spec, event.tool, step, args, None))
                     temporal_failed = True
             if temporal_failed:

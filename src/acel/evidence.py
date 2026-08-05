@@ -9,6 +9,17 @@ chain, no blockchain/consensus involved.
 Ed25519 signing is layered on top *only* when the optional ``cryptography``
 dependency is installed (see :func:`ed25519_signer`); the hash chain works with
 the standard library alone.
+
+Security note: a bundle's ``violation`` field embeds the full call arguments,
+result, and state snapshot at the moment of the violation (``Violation.to_dict``
+in ``violations.py``) — that's what makes a bundle useful evidence, but it
+also means anything sensitive passed as a tool argument (a password, a raw
+token, a secret) ends up persisted in the evidence log verbatim if you save
+one to disk or share it. ACEL doesn't redact or hash argument values before
+recording them, by design — it can't know which fields are sensitive without
+you telling it. If your tools take arguments you wouldn't want sitting in a
+log file, keep secrets out of tool *arguments* entirely (pass a reference/ID
+and resolve the real secret inside your own tool implementation instead).
 """
 
 from __future__ import annotations
@@ -137,6 +148,17 @@ def ed25519_signer() -> tuple[Signer, str]:
 
     Requires the optional ``cryptography`` dependency. Raises ImportError if it
     is not installed — signing is strictly opt-in.
+
+    The private key is generated fresh in memory on every call and is never
+    persisted or returned — only the public key (as hex) comes back. That
+    means signatures from one process can only be verified against the public
+    key from *that same* call; restart the process (or call this again) and
+    you get a brand-new keypair, so old signatures are no longer verifiable
+    against the new public key. If you need signatures that remain verifiable
+    across restarts, generate and store your own long-lived Ed25519 keypair
+    and pass a signer built from it instead of using this convenience
+    function — this function exists for the common case of "sign within one
+    process's lifetime," not for long-term signature retention.
     """
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
