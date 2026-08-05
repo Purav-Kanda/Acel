@@ -16,9 +16,14 @@ from acel import Session, at_most_n_times, must_precede
 from acel.mcp_middleware import ACELMiddleware
 
 
-def build_session() -> Session:
-    """The contracts a real deployment would declare for this toy tool server."""
-    session = Session(state={"authenticated": False}, halt_on_violation=False)
+def build_session(mode: str = "enforce") -> Session:
+    """The contracts a real deployment would declare for this toy tool server.
+
+    ``mode="shadow"`` detects and logs every violation without ever blocking
+    a call — the recommended way to try a new set of contracts against real
+    traffic before switching to ``"enforce"``.
+    """
+    session = Session(state={"authenticated": False}, halt_on_violation=False, mode=mode)
     session.add_contract(must_precede("validate_record", "delete_record"))
     session.add_contract(at_most_n_times("send_payment", n=1))
     session.register_tool(
@@ -32,8 +37,8 @@ def build_session() -> Session:
     return session
 
 
-def build_server(session: Session | None = None) -> tuple[MCPServer, Session]:
-    session = session or build_session()
+def build_server(session: Session | None = None, mode: str = "enforce") -> tuple[MCPServer, Session]:
+    session = session or build_session(mode=mode)
     server = MCPServer("acel-toy-server", middleware=[ACELMiddleware(session)])
 
     @server.tool()
