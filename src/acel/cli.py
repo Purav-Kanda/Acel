@@ -1,15 +1,21 @@
 """The ``acel`` command-line interface.
 
-Ships two commands:
+Ships four commands:
 
 - ``acel replay`` — check a recorded tool-call trace against a set of
   temporal contracts, offline. Intended for CI: exits non-zero if any
   contract is violated, so a bad agent trace fails the build.
+- ``acel validate`` — parse a rules file (JSON or YAML) and print the
+  contracts it declares, without running anything. A quick sanity check
+  before wiring a rules file into ``replay`` or ``serve``.
 - ``acel serve`` — run a live MCP server with ACEL enforcement wired in,
-  over stdio. The contracts live in your server module's own
-  ``build_server()`` function (see ``examples/toy_server.py``), the same way
-  you'd actually deploy ACEL: as code, not a config file. ``replay``'s JSON
-  rules format is deliberately a separate, CI-oriented workflow.
+  over stdio. Contracts can come from your server module's own
+  ``build_server()`` function (see ``examples/toy_server.py``) and/or from a
+  ``--contracts`` rules file layered on top — the file only ever declares
+  temporal ordering rules and initial state (plain data), never code;
+  pre/postconditions still require Python since they evaluate logic over
+  state, not just names and counts (see ``acel/config.py`` for why).
+- ``acel init-config`` — write a starter rules file to edit.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from .registry import build_contract
+from . import config as config_mod
 from .session import Session
 
 
@@ -34,12 +40,19 @@ def _load_json(path: str) -> Any:
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    rules = _load_json(args.rules)
+    try:
+        rules = config_mod.load_rules(args.rules)
+    except config_mod.ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     trace = _load_json(args.trace)
 
-    session = Session(state=rules.get("initial_state"), halt_on_violation=False)
-    for spec in rules.get("contracts", []):
-        session.add_contract(build_contract(spec))
+    session = Session(state=config_mod.state_from_rules(rules), halt_on_violation=False)
+    try:
+        session.add_contracts(config_mod.contracts_from_rules(rules))
+    except config_mod.ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     violations = session.replay(trace)
 
@@ -115,6 +128,20 @@ def cmd_serve(args: argparse.Namespace) -> int:
             )
         server, session = module.build_server()
 
+    if args.contracts:
+        try:
+            rules = config_mod.load_rules(args.contracts)
+            extra_contracts = config_mod.contracts_from_rules(rules)
+        except config_mod.ConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        session.add_contracts(extra_contracts)
+        session.state.update(config_mod.state_from_rules(rules))
+        print(
+            f"Loaded {len(extra_contracts)} contract(s) from {args.contracts!r}.",
+            file=sys.stderr,
+        )
+
     contract_names = ", ".join(c.spec for c in session.contracts) or "(none)"
     print(f"ACEL serving '{server.name}' over stdio, mode={session.mode}.", file=sys.stderr)
     print(f"Active contracts: {contract_names}", file=sys.stderr)
@@ -131,6 +158,58 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate(args: argparse.Namespace) -> int:
+    try:
+        rules = config_mod.load_rules(args.rules)
+        contracts = config_mod.contracts_from_rules(rules)
+        state = config_mod.state_from_rules(rules)
+    except config_mod.ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"OK — {args.rules} parses cleanly.")
+    print(f"Initial state: {state or '(none)'}")
+    if not contracts:
+        print("Contracts: (none declared)")
+    else:
+        print(f"Contracts ({len(contracts)}):")
+        for c in contracts:
+            print(f"  - {c.spec}")
+    return 0
+
+
+_STARTER_CONFIG = """\
+# ACEL rules file — declarative temporal contracts + initial state.
+# Load it with `acel validate rules.yaml`, `acel replay trace.json --rules rules.yaml`,
+# or `acel serve your_server.py --contracts rules.yaml`.
+#
+# Templates: must_precede, at_most_n_times, never_after,
+# required_before_session_end, cannot_follow_without, mutually_exclusive.
+# Pre/postconditions aren't expressible here on purpose — they need real
+# logic over state, so they stay in your Python tool registration.
+
+state:
+  authenticated: false
+
+contracts:
+  - template: must_precede
+    args: [validate_record, delete_record]
+  - template: at_most_n_times
+    args: [send_payment]
+    kwargs: {n: 1}
+"""
+
+
+def cmd_init_config(args: argparse.Namespace) -> int:
+    path = Path(args.path)
+    if path.exists() and not args.force:
+        print(f"error: {path} already exists (use --force to overwrite)", file=sys.stderr)
+        return 2
+    path.write_text(_STARTER_CONFIG, encoding="utf-8")
+    print(f"Wrote a starter rules file to {path}. Edit it, then try: acel validate {path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="acel",
@@ -140,13 +219,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     replay = sub.add_parser("replay", help="Check a recorded trace against contracts.")
     replay.add_argument("trace", help="Path to a JSON trace: a list of {tool, args, result}.")
-    replay.add_argument("--rules", required=True, help="Path to a JSON rules file.")
+    replay.add_argument("--rules", required=True, help="Path to a JSON or YAML rules file.")
     replay.add_argument(
         "--evidence",
         action="store_true",
         help="Print the hash-chained evidence bundle for any violations.",
     )
     replay.set_defaults(func=cmd_replay)
+
+    validate = sub.add_parser(
+        "validate", help="Parse a rules file and print the contracts it declares."
+    )
+    validate.add_argument("rules", help="Path to a JSON or YAML rules file.")
+    validate.set_defaults(func=cmd_validate)
+
+    init_config = sub.add_parser(
+        "init-config", help="Write a starter rules file to edit."
+    )
+    init_config.add_argument(
+        "path", nargs="?", default="rules.yaml", help="Where to write it (default: rules.yaml)."
+    )
+    init_config.add_argument(
+        "--force", action="store_true", help="Overwrite the file if it already exists."
+    )
+    init_config.set_defaults(func=cmd_init_config)
 
     serve = sub.add_parser("serve", help="Run a live, ACEL-enforced MCP server over stdio.")
     serve.add_argument(
@@ -158,6 +254,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run in shadow mode: log violations without blocking any call. "
         "Requires the module's build_server() to accept a `mode` argument.",
+    )
+    serve.add_argument(
+        "--contracts",
+        help="Path to a JSON/YAML rules file: extra temporal contracts (and initial "
+        "state) layered on top of whatever the module's build_server() already sets up.",
     )
     serve.set_defaults(func=cmd_serve)
 

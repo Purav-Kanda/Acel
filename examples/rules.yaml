@@ -1,0 +1,12 @@
+# Same contracts as examples/rules.json, in YAML — the two are interchangeable.
+state:
+  authenticated: false
+
+contracts:
+  - template: must_precede
+    args: [validate_record, delete_record]
+  - template: at_most_n_times
+    args: [send_payment]
+    kwargs: {n: 1}
+  - template: required_before_session_end
+    args: [authenticate]

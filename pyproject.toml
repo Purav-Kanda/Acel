@@ -32,6 +32,7 @@ Issues = "https://github.com/Purav-Kanda/Acel/issues"
 dev = ["pytest>=8.0", "hypothesis>=6.0"]
 sign = ["cryptography>=42.0"]
 mcp = ["mcp>=2.0"]
+config = ["pyyaml>=6.0"]
 
 [project.scripts]
 acel = "acel.cli:main"

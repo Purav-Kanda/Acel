@@ -163,6 +163,53 @@ CLI all respect `mode`. `Session.replay()` does not — it's a retrospective
 CI-gate tool ("would this recorded trace have been blocked"), not a live
 session, so it always reports every violation regardless of mode.
 
+## Config-driven contracts (no code required)
+
+Temporal contracts can be declared in a plain JSON or YAML file instead of
+Python — useful for trying ACEL against your own tools without writing any
+code, or for keeping the rule set separate from your server implementation:
+
+```bash
+acel init-config rules.yaml     # writes a starter file
+acel validate rules.yaml        # parses it, prints the contracts it declares
+```
+
+```yaml
+state:
+  authenticated: false
+
+contracts:
+  - template: must_precede
+    args: [validate_record, delete_record]
+  - template: at_most_n_times
+    args: [send_payment]
+    kwargs: {n: 1}
+```
+
+Layer a rules file on top of a live server (`--contracts` adds to whatever
+`build_server()` already sets up, and merges the `state` block in):
+
+```bash
+acel serve examples/toy_server.py --contracts rules.yaml
+```
+
+Or check a recorded trace against a rules file directly (the same format
+`acel replay` has always used, now also parseable as YAML):
+
+```bash
+acel replay trace.json --rules rules.yaml
+```
+
+**Why preconditions/postconditions aren't in the config file:** they
+evaluate real logic over state (`lambda s: s.get("authenticated") is True`),
+and there's no safe way to deserialize arbitrary logic from a data file
+without either an `eval`-style security hole or a bespoke expression
+language. Temporal contracts have no such problem — every template is fully
+described by tool names and simple parameters, so building one from a config
+file is just constructing an object from validated data, no code execution
+involved. Pre/postconditions stay in Python, wired directly to your tools —
+install YAML support with `pip install "acel-core[config]"`.
+
 ## Correctness
 
 ```bash
