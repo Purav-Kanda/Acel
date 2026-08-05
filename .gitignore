@@ -10,3 +10,6 @@ dist/
 .venv/
 venv/
 *.log
+
+# Extracted sdist copy (build artifact, not source)
+acel_core-0.1.0/
