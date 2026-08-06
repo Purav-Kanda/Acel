@@ -12,6 +12,11 @@ Ships five commands:
   ``replay --evidence --save-evidence``) for tampering, by recomputing its
   hash chain from scratch. Reports exactly which bundle broke the chain, if
   any did.
+- ``acel show`` — pretty-print a saved evidence-log JSON file as a
+  human-readable timeline: one entry per violation, in order, with the
+  contract that broke, the call that broke it, and the chain-verification
+  status — for actually looking at what ACEL caught, instead of reading raw
+  JSON.
 - ``acel serve`` — run a live MCP server with ACEL enforcement wired in,
   over stdio. Contracts can come from your server module's own
   ``build_server()`` function (see ``examples/toy_server.py``) and/or from a
@@ -79,15 +84,9 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    try:
-        bundles = _load_json(args.evidence_file)
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"error: could not read {args.evidence_file!r}: {exc}", file=sys.stderr)
-        return 2
-
-    if not isinstance(bundles, list):
-        print(f"error: {args.evidence_file!r} must contain a JSON list of evidence bundles", file=sys.stderr)
-        return 2
+    bundles, code = _load_evidence_bundles(args.evidence_file)
+    if bundles is None:
+        return code
 
     if not bundles:
         print(f"OK — {args.evidence_file} contains 0 bundles (nothing to verify).")
@@ -115,6 +114,87 @@ def cmd_verify(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def _short_hash(h: str, length: int = 10) -> str:
+    return h[:length] + "…" if len(h) > length else h
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(", ", ": "), default=str)
+
+
+def _load_evidence_bundles(path: str) -> tuple[list[dict[str, Any]] | None, int]:
+    """Shared loader for ``verify``/``show``: read+validate an evidence-log
+    JSON file, returning ``(bundles, exit_code)``. ``bundles`` is ``None``
+    if loading failed and the caller should just return ``exit_code``."""
+    try:
+        bundles = _load_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"error: could not read {path!r}: {exc}", file=sys.stderr)
+        return None, 2
+    if not isinstance(bundles, list):
+        print(f"error: {path!r} must contain a JSON list of evidence bundles", file=sys.stderr)
+        return None, 2
+    return bundles, 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    bundles, code = _load_evidence_bundles(args.evidence_file)
+    if bundles is None:
+        return code
+
+    if not bundles:
+        print(f"{args.evidence_file}: 0 bundles (no violations recorded).")
+        return 0
+
+    try:
+        ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles)
+    except (KeyError, TypeError) as exc:
+        print(
+            f"error: {args.evidence_file!r} doesn't look like a valid evidence log "
+            f"(missing or malformed field: {exc})",
+            file=sys.stderr,
+        )
+        return 2
+
+    chain_status = "chain OK" if ok else f"CHAIN BROKEN at bundle {bad_index}"
+    print(f"ACEL Evidence Log — {args.evidence_file}")
+    print(f"{len(bundles)} bundle(s), {chain_status}\n")
+
+    for i, bundle in enumerate(bundles):
+        violation = bundle.get("violation", {})
+        marker = ""
+        if not ok:
+            if i == bad_index:
+                marker = "  ⚠ CHAIN BROKEN HERE"
+            elif i > bad_index:
+                marker = "  ⚠ untrustworthy (chain broke earlier)"
+
+        print(f"[{i}] {bundle.get('timestamp', '?')}  step {violation.get('step', '?')}{marker}")
+        print(f"    kind:     {violation.get('kind', '?')}")
+        print(f"    contract: {violation.get('spec', '?')}")
+        print(f"    tool:     {violation.get('tool', '?')}")
+        print(f"    args:     {_compact_json(violation.get('args', {}))}")
+        if violation.get("result") is not None:
+            print(f"    result:   {_compact_json(violation.get('result'))}")
+        state = violation.get("state_snapshot") or {}
+        if state:
+            print(f"    state:    {_compact_json(state)}")
+        if args.trace:
+            trace = violation.get("trace") or []
+            print(f"    trace ({len(trace)} call(s) leading up to this):")
+            for entry in trace:
+                print(
+                    f"      step {entry.get('step', '?')}: {entry.get('tool', '?')}"
+                    f"({_compact_json(entry.get('args', {}))}) -> "
+                    f"{_compact_json(entry.get('result'))}"
+                )
+        signed = "signed" if bundle.get("signature") else "unsigned"
+        print(f"    hash:     {_short_hash(bundle.get('bundle_hash', '?'))}  ({signed})")
+        print()
+
+    return 0 if ok else 1
 
 
 def _load_module(ref: str) -> ModuleType:
@@ -288,6 +368,19 @@ def build_parser() -> argparse.ArgumentParser:
         "evidence_file", help="Path to a JSON file containing a list of evidence bundles."
     )
     verify.set_defaults(func=cmd_verify)
+
+    show = sub.add_parser(
+        "show", help="Pretty-print a saved evidence-log JSON file as a timeline."
+    )
+    show.add_argument(
+        "evidence_file", help="Path to a JSON file containing a list of evidence bundles."
+    )
+    show.add_argument(
+        "--trace",
+        action="store_true",
+        help="Also print the full call trace leading up to each violation.",
+    )
+    show.set_defaults(func=cmd_show)
 
     validate = sub.add_parser(
         "validate", help="Parse a rules file and print the contracts it declares."

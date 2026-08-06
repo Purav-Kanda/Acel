@@ -287,6 +287,31 @@ what actually helps you investigate:
 FAIL — tampering detected. Bundle 1 (of 5) is the first to break the chain...
 ```
 
+To actually *look at* what's in an evidence log, rather than just check its
+integrity, use `acel show` — a human-readable timeline instead of raw JSON:
+
+```bash
+acel show evidence.json --trace
+```
+
+```
+ACEL Evidence Log — evidence.json
+1 bundle(s), chain OK
+
+[0] 2026-08-06T18:07:34.466187+00:00  step 1
+    kind:     temporal
+    contract: must_precede(validate_record, delete_record)
+    tool:     delete_record
+    args:     {"id": "1"}
+    trace (0 call(s) leading up to this):
+    hash:     fab359c33c…  (unsigned)
+```
+
+`--trace` prints the full call history leading up to each violation, not
+just the offending call; drop it for a shorter summary. If the chain is
+broken, `acel show` marks the exact bundle where it happened the same way
+`acel verify` does.
+
 ## Security notes
 
 - **Evidence bundles embed full call arguments, results, and state
