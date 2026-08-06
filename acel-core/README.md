@@ -1,0 +1,361 @@
+# ACEL — Agent Contract Enforcement Layer (core)
+
+**Runtime verification for AI agent tool calls.** Declare temporal ordering
+contracts and Hoare-style pre/postconditions in plain Python, and have them
+enforced live against the stream of tool calls an agent makes — halting the
+agent the moment a rule is broken.
+
+> `acel-core` ships the transport-independent monitor (Phase 1) plus a live
+> MCP proxy (Phase 2): the same contracts enforced against a real MCP server,
+> via the official MCP Python SDK's request-middleware pipeline.
+
+This is **runtime verification** — checking each concrete execution against a
+specification as it happens. It does not prove the agent correct in general; it
+guarantees that *this* run did not violate the rules you declared.
+
+## Why
+
+Statistical agent-eval tools answer "how often does this agent behave well, on
+average?" ACEL answers the production question they can't: "did *this* execution
+just violate a rule we cannot allow to be violated?" — before the bad tool call
+lands.
+
+## Install
+
+```bash
+pip install -e .
+```
+
+## Quickstart
+
+```python
+from acel import Session, must_precede, at_most_n_times
+
+session = Session(state={"authenticated": False})
+
+# Temporal ordering rules (no logic syntax required):
+session.add_contract(must_precede("validate_record", "delete_record"))
+session.add_contract(at_most_n_times("send_payment", n=1))
+
+# State-based gate: reads only allowed once authenticated.
+session.register_tool(
+    "read_user_data",
+    precondition=lambda s: s.get("authenticated") is True,
+)
+# Authentication commits trusted info into session state.
+session.register_tool(
+    "authenticate",
+    commit=lambda s, args, result: s.set("authenticated", result["ok"]),
+)
+
+session.call("authenticate", {"user": "p"}, result={"ok": True})
+session.call("read_user_data", {"query": "SELECT ..."}, result={"rows": []})
+
+# This halts: delete before validate.
+session.call("delete_record", {"id": "r_42"})   # raises ContractViolation
+```
+
+On violation, a `ContractViolation` is raised carrying a `Violation` record:
+
+```python
+from acel import ContractViolation
+
+try:
+    session.call("delete_record", {"id": "r_42"})
+except ContractViolation as exc:
+    v = exc.violation
+    print(v.kind)            # "temporal"
+    print(v.spec)            # "must_precede(validate_record, delete_record)"
+    print(v.step)            # index of the offending call
+    print(v.trace)           # every call up to the violation
+    print(v.state_snapshot)  # symbolic state at the moment it broke
+```
+
+## The seven temporal templates
+
+| Template | Meaning |
+| --- | --- |
+| `must_precede(a, b)` | every `b` must be preceded by some `a` |
+| `at_most_n_times(a, n)` | `a` occurs at most `n` times per session |
+| `at_most_total(a, field, limit)` | the sum of `args[field]` across all calls to `a` must not exceed `limit` |
+| `never_after(a, b)` | `a` must never occur after `b` |
+| `required_before_session_end(a)` | `a` must occur at least once before the session ends |
+| `cannot_follow_without(a, b)` | `a` may not occur unless `b` occurred earlier |
+| `mutually_exclusive(a, b)` | `a` and `b` must not both occur in one session |
+
+Each template is a deterministic automaton advanced in O(1) per tool call, with
+a three-valued verdict (`SATISFIED` / `VIOLATED` / `UNKNOWN`) over the finite
+trace. `at_most_total` is the odd one out — it's the only template that reads
+call *arguments* rather than just the tool name, since it has to sum a
+numeric field (e.g. a payment amount) across calls. It fails closed: a call
+missing the field, or with a non-numeric value there, is treated as a
+violation rather than silently let through — for a contract whose whole
+purpose is capping spend, silently ignoring an unreadable amount would be the
+actually dangerous failure mode.
+
+```python
+from acel import Session, at_most_total
+
+session = Session()
+session.add_contract(at_most_total("send_payment", "amount", limit=500))
+
+session.call("send_payment", {"amount": 300}, result={"sent": True})
+session.call("send_payment", {"amount": 250}, result={"sent": True})  # raises: 550 > 500
+```
+
+## Pre/postconditions with decorators
+
+```python
+from acel import Session, precondition, postcondition
+
+@precondition(lambda s: s.get("authenticated") is True)
+@postcondition(lambda s, r: r["tenant_id"] == s.get("current_tenant"))
+def search_database(query): ...
+
+session = Session(state={"authenticated": True, "current_tenant": "t_9"})
+session.register(search_database)
+```
+
+## Offline analysis / CI mode
+
+`Session.replay` runs a recorded trace and returns **every** violation without
+executing anything — the basis for the coming `acel replay trace.json` CLI and
+for testing contracts against known-bad traces.
+
+```python
+violations = session.replay([
+    {"tool": "delete_record", "args": {"id": "1"}},
+])
+```
+
+## Live MCP proxy (Phase 2)
+
+ACEL can gate a **real** MCP server's tool calls, live, via the official MCP
+Python SDK's `ServerMiddleware` hook. Every `tools/call` request passes
+through ACEL's gate *before* the real tool handler runs — a blocked call has
+zero side effects.
+
+```bash
+pip install "acel-core[mcp]"
+```
+
+```python
+from mcp.server.mcpserver import MCPServer
+from acel import Session, must_precede
+from acel.mcp_middleware import ACELMiddleware
+
+session = Session()
+session.add_contract(must_precede("validate_record", "delete_record"))
+
+server = MCPServer("my-server", middleware=[ACELMiddleware(session)])
+
+@server.tool()
+def delete_record(record_id: str) -> dict: ...
+```
+
+See `examples/toy_server.py` for a complete toy server (5 tools, 3 contracts)
+and `tests/test_mcp_proxy.py` for an end-to-end demo: a real `ClientSession`
+talking to this server, with ACEL catching an ordering violation, a
+cardinality violation, and a state-precondition violation — each one halted
+before the tool it would have run.
+
+### Multiple simultaneous clients
+
+`ACELMiddleware(session)` above wires one fixed `Session` shared by every
+client that connects — fine for local testing or a server that only ever
+has one client at a time, but unsafe once more than one client can connect
+at once: every connection would read and write the same state, contracts,
+and trace, so one client's calls could trip another client's rules or one
+client's authentication could leak into another's session.
+
+For a server meant to serve more than one client at once, pass
+`session_factory` instead of `session`: ACEL builds a brand-new, fully
+isolated `Session` the first time each connection is seen, and reuses it
+for the rest of that connection's requests. Different connections never
+share state, contracts, or trace.
+
+```python
+from acel.mcp_middleware import ACELMiddleware
+
+def build_session() -> Session:
+    session = Session(state={"authenticated": False})
+    session.add_contract(must_precede("authenticate", "read_user_data"))
+    return session
+
+middleware = ACELMiddleware(session_factory=build_session)
+server = MCPServer("my-server", middleware=[middleware])
+```
+
+Sessions are tracked internally by the MCP SDK's own per-connection
+`Connection` object via a weak-reference map, so a session is released as
+soon as its connection closes rather than accumulating forever on a
+long-running server. See `examples/multi_tenant_server.py` for a complete
+runnable example and `tests/test_multi_tenant.py` for an end-to-end proof
+against two real, simultaneous `ClientSession` connections: one client
+authenticates, its own follow-up call succeeds, and the *other* client's
+identical call is still blocked, proving zero state leakage between them.
+
+## Shadow mode
+
+The recommended way to roll out a new set of contracts: **shadow mode**
+detects and records every violation exactly as enforce mode does — same
+evidence log, same hash chain — but never blocks a call. Run it against real
+traffic first, see what it would have caught, then switch to enforce once
+you trust the rules.
+
+```python
+session = Session(mode="shadow")  # default is "enforce"
+```
+
+```bash
+acel serve examples/toy_server.py --shadow
+```
+
+`Session.call()`, `.precheck()`/`.postcheck()` (the MCP proxy path), and the
+CLI all respect `mode`. `Session.replay()` does not — it's a retrospective
+CI-gate tool ("would this recorded trace have been blocked"), not a live
+session, so it always reports every violation regardless of mode.
+
+## Config-driven contracts (no code required)
+
+Temporal contracts can be declared in a plain JSON or YAML file instead of
+Python — useful for trying ACEL against your own tools without writing any
+code, or for keeping the rule set separate from your server implementation:
+
+```bash
+acel init-config rules.yaml     # writes a starter file
+acel validate rules.yaml        # parses it, prints the contracts it declares
+```
+
+```yaml
+state:
+  authenticated: false
+
+contracts:
+  - template: must_precede
+    args: [validate_record, delete_record]
+  - template: at_most_n_times
+    args: [send_payment]
+    kwargs: {n: 1}
+```
+
+Layer a rules file on top of a live server (`--contracts` adds to whatever
+`build_server()` already sets up, and merges the `state` block in):
+
+```bash
+acel serve examples/toy_server.py --contracts rules.yaml
+```
+
+Or check a recorded trace against a rules file directly (the same format
+`acel replay` has always used, now also parseable as YAML):
+
+```bash
+acel replay trace.json --rules rules.yaml
+```
+
+**Why preconditions/postconditions aren't in the config file:** they
+evaluate real logic over state (`lambda s: s.get("authenticated") is True`),
+and there's no safe way to deserialize arbitrary logic from a data file
+without either an `eval`-style security hole or a bespoke expression
+language. Temporal contracts have no such problem — every template is fully
+described by tool names and simple parameters, so building one from a config
+file is just constructing an object from validated data, no code execution
+involved. Pre/postconditions stay in Python, wired directly to your tools —
+install YAML support with `pip install "acel-core[config]"`.
+
+## Verifying evidence for tampering
+
+Every violation is recorded as a tamper-evident, hash-chained bundle. Save
+one to disk and check it later — from a completely fresh process, with no
+in-memory state — with `acel verify`:
+
+```bash
+acel replay trace.json --rules rules.json --save-evidence evidence.json
+acel verify evidence.json
+```
+
+```
+OK — 3 bundle(s) verified. Hash chain is intact, no tampering detected.
+```
+
+If any field in any bundle was altered after the fact, `acel verify` fails
+and reports the exact bundle index where the chain first breaks — everything
+from that point onward is untrustworthy, but pinpointing *where* it broke is
+what actually helps you investigate:
+
+```
+FAIL — tampering detected. Bundle 1 (of 5) is the first to break the chain...
+```
+
+## Security notes
+
+- **Evidence bundles embed full call arguments, results, and state
+  snapshots.** That's what makes them useful evidence, but it also means
+  anything sensitive passed as a tool argument (a password, a raw token, a
+  secret) ends up persisted verbatim if you save an evidence log to disk or
+  share it. ACEL doesn't redact argument values — it has no way to know which
+  fields are sensitive without you telling it. Keep secrets out of tool
+  *arguments* entirely; pass a reference/ID instead and resolve the real
+  secret inside your own tool implementation.
+- **`ed25519_signer()` generates a fresh, unpersisted key every call.** Only
+  the public key comes back — the private key never leaves memory and isn't
+  saved anywhere. That's fine for signing within one process's lifetime, but
+  restart the process (or call it again) and old signatures are no longer
+  verifiable against the new public key. If you need signatures that stay
+  verifiable across restarts, generate and store your own long-lived Ed25519
+  keypair rather than relying on this convenience function.
+- **Config files (`--rules`, `--contracts`) are parsed with `yaml.safe_load`
+  and `json.loads` only** — never `yaml.load` or `eval`. There is no code
+  execution path from a rules file; that's exactly why pre/postconditions
+  can't be declared there (see above) — only tool names, counts, and plain
+  values are ever deserialized.
+
+## Correctness
+
+```bash
+python benchmarks/correctness.py
+```
+
+A labeled dataset of 59 synthetic tool-call traces spanning all 7 temporal
+templates (valid sequences, violating sequences, and edge cases like empty
+traces and multiple simultaneous contracts) — measured at **100% precision
+and 100% recall**. Since the monitor is deterministic automaton checking, not
+statistical detection, that's the expected result; the suite exists to prove
+it and to catch any future regression (it's also wired into `pytest` as
+`tests/test_correctness_suite.py`, so a miss fails CI directly).
+
+## Performance
+
+```bash
+python benchmarks/latency.py
+```
+
+Measured on the reference dev machine, 20,000 iterations, discarding a 1,000-call
+warmup: added p95 latency per tool call is **~0.005ms at 1 active contract** and
+**~0.04ms at 50 concurrently active contracts** — well under the <5ms target.
+Each temporal contract is a deterministic automaton advanced in O(1) per event,
+so overhead scales linearly with the number of *active* contracts, not with
+session length.
+
+## Tests
+
+```bash
+pip install pytest
+pytest                    # core monitor + evidence (no extra deps)
+pip install "acel-core[mcp]"
+pytest tests/test_mcp_proxy.py tests/test_cli_serve.py   # live MCP proxy + CLI
+```
+
+## Testing against a real agent, not a script
+
+Everything above proves ACEL works against scripted tool calls. For the
+stronger version — a real LLM in Claude Desktop or Claude Code actually
+driving the tool calls, and ACEL blocking a mistake the model made itself —
+see [`docs/TESTING_WITH_REAL_AGENTS.md`](docs/TESTING_WITH_REAL_AGENTS.md).
+It walks through wiring up `examples/support_agent_server.py` (a realistic
+customer-support/refund scenario) and gives adversarial prompts designed to
+actually trigger each contract.
+
+## License
+
+MIT

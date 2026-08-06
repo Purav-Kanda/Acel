@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acel-core"
+version = "0.1.4"
+description = "Agent Contract Enforcement Layer — runtime verification of AI agent tool calls (core monitor)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Purav Kanda", email = "kandapurav13@gmail.com" }]
+keywords = ["llm", "agents", "runtime-verification", "temporal-logic", "mcp", "agent-safety"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Purav-Kanda/Acel"
+Repository = "https://github.com/Purav-Kanda/Acel"
+Issues = "https://github.com/Purav-Kanda/Acel/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "hypothesis>=6.0"]
+sign = ["cryptography>=42.0"]
+mcp = ["mcp>=2.0"]
+config = ["pyyaml>=6.0"]
+
+[project.scripts]
+acel = "acel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
