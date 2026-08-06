@@ -290,20 +290,43 @@ FAIL — tampering detected. Bundle 1 (of 5) is the first to break the chain...
 ## Security notes
 
 - **Evidence bundles embed full call arguments, results, and state
-  snapshots.** That's what makes them useful evidence, but it also means
-  anything sensitive passed as a tool argument (a password, a raw token, a
-  secret) ends up persisted verbatim if you save an evidence log to disk or
-  share it. ACEL doesn't redact argument values — it has no way to know which
-  fields are sensitive without you telling it. Keep secrets out of tool
-  *arguments* entirely; pass a reference/ID instead and resolve the real
-  secret inside your own tool implementation.
-- **`ed25519_signer()` generates a fresh, unpersisted key every call.** Only
-  the public key comes back — the private key never leaves memory and isn't
-  saved anywhere. That's fine for signing within one process's lifetime, but
-  restart the process (or call it again) and old signatures are no longer
-  verifiable against the new public key. If you need signatures that stay
-  verifiable across restarts, generate and store your own long-lived Ed25519
-  keypair rather than relying on this convenience function.
+  snapshots by default.** That's what makes them useful evidence, but it
+  also means anything sensitive passed as a tool argument (a password, a raw
+  token, a secret) ends up persisted verbatim if you save an evidence log to
+  disk or share it — unless you opt into redaction. Pass `redact_fields=` to
+  `Session` (or directly to `EvidenceLog`) with the dict-key names you
+  consider sensitive, and any matching value anywhere in a violation's
+  args/result/trace/state — nested dicts and per-call trace entries
+  included — is replaced with a short, non-reversible hash marker *before*
+  the bundle is hashed or signed:
+
+  ```python
+  session = Session(redact_fields={"password", "api_key", "ssn"})
+  ```
+
+  Two redacted entries with the same original value still produce the same
+  marker (so "this session reused the same token twice" stays visible to an
+  auditor), but the marker never reveals the plaintext. Fields you don't
+  list are left alone, so still prefer keeping secrets out of tool
+  *arguments* entirely where you can — pass a reference/ID and resolve the
+  real secret inside your own tool implementation instead.
+- **`ed25519_signer()` can persist its key, or stay ephemeral — your
+  choice.** Called with no arguments, it generates a fresh, unpersisted key
+  every time (fine for signing within one process's lifetime, but restart
+  and old signatures stop matching the new public key). Called with a path
+  (`ed25519_signer("~/.acel/signing_key.bin")`), it generates the key once,
+  writes it to that file with owner-only permissions (`0o600`), and reuses
+  it on every future call with the same path — so the public key, and every
+  signature made against it, stays verifiable across restarts:
+
+  ```python
+  sign, public_key_hex = ed25519_signer("~/.acel/signing_key.bin")
+  session = Session(signer=sign)
+  ```
+
+  Treat that key file exactly like an SSH private key: back it up if you
+  need old signatures to keep verifying, and never commit it to a repo or
+  evidence log.
 - **Config files (`--rules`, `--contracts`) are parsed with `yaml.safe_load`
   and `json.loads` only** — never `yaml.load` or `eval`. There is no code
   execution path from a rules file; that's exactly why pre/postconditions

@@ -15,11 +15,15 @@ result, and state snapshot at the moment of the violation (``Violation.to_dict``
 in ``violations.py``) — that's what makes a bundle useful evidence, but it
 also means anything sensitive passed as a tool argument (a password, a raw
 token, a secret) ends up persisted in the evidence log verbatim if you save
-one to disk or share it. ACEL doesn't redact or hash argument values before
-recording them, by design — it can't know which fields are sensitive without
-you telling it. If your tools take arguments you wouldn't want sitting in a
-log file, keep secrets out of tool *arguments* entirely (pass a reference/ID
-and resolve the real secret inside your own tool implementation instead).
+one to disk or share it. By default ACEL does *not* redact or hash argument
+values before recording them, because it can't know which fields are
+sensitive without you telling it — but you can tell it: pass
+``redact_fields={"password", "api_key", ...}`` to :class:`EvidenceLog` (or
+to :class:`~acel.session.Session`) and any dict key matching one of those
+names, anywhere in the bundle's args/result/trace/state_snapshot (including
+nested), is replaced with a short, non-reversible hash marker instead of the
+real value before the bundle is ever hashed or written. See
+:func:`redact_violation` for the redaction rule itself.
 """
 
 from __future__ import annotations
@@ -28,7 +32,8 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional
 
 from .violations import Violation
 
@@ -51,6 +56,53 @@ def _payload_of(index: int, timestamp: str, violation: dict[str, Any]) -> dict[s
     return {"index": index, "timestamp": timestamp, "violation": violation}
 
 
+def _redact_marker(value: Any) -> str:
+    """A short, non-reversible stand-in for a redacted value.
+
+    Hashing (rather than just writing ``"***REDACTED***"``) means two
+    redacted entries that came from the *same* original value still look
+    identical to an auditor — e.g. "this session used the same API key in
+    calls 3 and 7" is still visible — without the plaintext ever being
+    recoverable from the marker.
+    """
+    digest = _sha256_hex(_canonical({"v": value}))[:16]
+    return f"***REDACTED(sha256:{digest})***"
+
+
+def _redact_tree(node: Any, fields_lower: set[str]) -> Any:
+    """Recursively replace any dict value whose key matches ``fields_lower``
+    (case-insensitively) with a redaction marker, walking into nested dicts
+    and lists (including lists of dicts, e.g. a violation's ``trace``)."""
+    if isinstance(node, dict):
+        return {
+            key: _redact_marker(value) if key.lower() in fields_lower else _redact_tree(value, fields_lower)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_redact_tree(item, fields_lower) for item in node]
+    return node
+
+
+def redact_violation(violation: dict[str, Any], fields: Iterable[str]) -> dict[str, Any]:
+    """Return a copy of a violation dict with sensitive fields masked.
+
+    ``fields`` is a set of dict-key names (matched case-insensitively) to
+    redact wherever they appear inside ``args``, ``result``,
+    ``state_snapshot``, or ``trace`` — including nested dicts and the
+    per-call dicts inside ``trace``. Everything else (``kind``, ``spec``,
+    ``tool``, ``step``) is left untouched since none of it can carry
+    arbitrary user data.
+    """
+    fields_lower = {f.lower() for f in fields}
+    if not fields_lower:
+        return dict(violation)
+    redacted = dict(violation)
+    for key in ("args", "result", "state_snapshot", "trace"):
+        if key in redacted:
+            redacted[key] = _redact_tree(redacted[key], fields_lower)
+    return redacted
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceBundle:
     """One signed, hash-chained record of a violation."""
@@ -70,9 +122,15 @@ class EvidenceBundle:
 class EvidenceLog:
     """An append-only, hash-chained log of evidence bundles for one session."""
 
-    def __init__(self, signer: Signer | None = None) -> None:
+    def __init__(
+        self,
+        signer: Signer | None = None,
+        *,
+        redact_fields: Iterable[str] | None = None,
+    ) -> None:
         self._bundles: list[EvidenceBundle] = []
         self._signer = signer
+        self._redact_fields = set(redact_fields) if redact_fields else None
 
     @property
     def bundles(self) -> list[EvidenceBundle]:
@@ -82,18 +140,28 @@ class EvidenceLog:
         return len(self._bundles)
 
     def record(self, violation: Violation) -> EvidenceBundle:
-        """Append a new bundle for ``violation`` and return it."""
+        """Append a new bundle for ``violation`` and return it.
+
+        If ``redact_fields`` was set on this log, sensitive values are
+        masked (see :func:`redact_violation`) *before* anything is hashed or
+        signed — a redacted bundle's hash chain is computed over the
+        redacted payload, so verification still works against the redacted
+        copy without ever needing the original values back.
+        """
         index = len(self._bundles)
         prev_hash = self._bundles[-1].bundle_hash if self._bundles else GENESIS_HASH
         timestamp = datetime.now(timezone.utc).isoformat()
-        payload = _payload_of(index, timestamp, violation.to_dict())
+        violation_dict = violation.to_dict()
+        if self._redact_fields:
+            violation_dict = redact_violation(violation_dict, self._redact_fields)
+        payload = _payload_of(index, timestamp, violation_dict)
         trace_hash = _sha256_hex(_canonical(payload))
         bundle_hash = _sha256_hex((prev_hash + trace_hash).encode())
         signature = self._signer(bundle_hash.encode()) if self._signer else None
         bundle = EvidenceBundle(
             index=index,
             timestamp=timestamp,
-            violation=violation.to_dict(),
+            violation=violation_dict,
             prev_hash=prev_hash,
             trace_hash=trace_hash,
             bundle_hash=bundle_hash,
@@ -143,32 +211,56 @@ class EvidenceLog:
         return True, None
 
 
-def ed25519_signer() -> tuple[Signer, str]:
+def ed25519_signer(key_path: str | Path | None = None) -> tuple[Signer, str]:
     """Build an Ed25519 signer, returning ``(signer, public_key_hex)``.
 
     Requires the optional ``cryptography`` dependency. Raises ImportError if it
     is not installed — signing is strictly opt-in.
 
-    The private key is generated fresh in memory on every call and is never
-    persisted or returned — only the public key (as hex) comes back. That
-    means signatures from one process can only be verified against the public
-    key from *that same* call; restart the process (or call this again) and
-    you get a brand-new keypair, so old signatures are no longer verifiable
-    against the new public key. If you need signatures that remain verifiable
-    across restarts, generate and store your own long-lived Ed25519 keypair
-    and pass a signer built from it instead of using this convenience
-    function — this function exists for the common case of "sign within one
-    process's lifetime," not for long-term signature retention.
+    ``key_path`` controls where the private key lives:
+
+    - **Omitted (default):** the private key is generated fresh in memory
+      and never written to disk. Signatures are only verifiable within the
+      current process's lifetime — call this again (or restart) and you get
+      a brand-new keypair, so old signatures stop matching the new public
+      key. Fine for a short-lived script or a test; not fine for evidence
+      you actually want to be able to verify later.
+    - **A path:** if the file already exists, the key is loaded from it and
+      reused; if it doesn't, a new key is generated and written there
+      (mode ``0o600``, readable only by the owner) so every future call with
+      the same path reuses the same identity. This is what you want for a
+      real deployment — the public key stays stable across restarts, so
+      evidence signed last week still verifies against the public key you
+      have on file today.
+
+    The private key file is raw 32-byte Ed25519 key material, not
+    PEM-wrapped — treat it exactly like an SSH private key: back it up if
+    you need old signatures to stay verifiable, and never commit it to a
+    repo or evidence log.
     """
     try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError(
             "Ed25519 signing requires the 'cryptography' package. "
             "Install it with: pip install cryptography"
         ) from exc
 
-    private_key = Ed25519PrivateKey.generate()
+    if key_path is None:
+        private_key = Ed25519PrivateKey.generate()
+    else:
+        path = Path(key_path)
+        if path.exists():
+            private_key = Ed25519PrivateKey.from_private_bytes(path.read_bytes())
+        else:
+            private_key = Ed25519PrivateKey.generate()
+            raw = private_key.private_bytes_raw()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+            path.chmod(0o600)
+
     public_key = private_key.public_key()
 
     def sign(data: bytes) -> str:

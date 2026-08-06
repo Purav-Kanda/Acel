@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from .conditions import Check, postcondition, precondition
 from .events import ToolCallEvent
-from .evidence import EvidenceBundle, EvidenceLog, ed25519_signer
+from .evidence import EvidenceBundle, EvidenceLog, ed25519_signer, redact_violation
 from .session import Gate, Session, ToolSpec
 from .state import StateStore
 from .temporal import (
@@ -28,7 +28,7 @@ from .temporal import (
 from .verdict import Verdict
 from .violations import ContractViolation, Violation
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 __all__ = [
     "__version__",
@@ -45,6 +45,7 @@ __all__ = [
     "EvidenceLog",
     "EvidenceBundle",
     "ed25519_signer",
+    "redact_violation",
     # conditions
     "precondition",
     "postcondition",

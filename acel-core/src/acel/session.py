@@ -94,6 +94,7 @@ class Session:
         halt_on_violation: bool = True,
         signer: Signer | None = None,
         mode: str = "enforce",
+        redact_fields: Iterable[str] | None = None,
     ) -> None:
         if mode not in ("enforce", "shadow"):
             raise ValueError(f"mode must be 'enforce' or 'shadow', got {mode!r}")
@@ -101,7 +102,7 @@ class Session:
         self.halt_on_violation = halt_on_violation
         self.mode = mode
         self.violations: list[Violation] = []
-        self.evidence = EvidenceLog(signer=signer)
+        self.evidence = EvidenceLog(signer=signer, redact_fields=redact_fields)
         self._contracts: list[TemporalContract] = []
         self._tools: dict[str, ToolSpec] = {}
         self._trace: list[dict[str, Any]] = []

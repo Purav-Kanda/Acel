@@ -152,7 +152,7 @@ Ed25519 signing is layered on top as a strictly optional extra (`ed25519_signer(
 
 ## 9. Summary
 
-ACEL is a small, fully-tested (173 passing tests, including a live end-to-end run against the real MCP SDK and a real subprocess, plus a second realistic demo server purpose-built for testing against an actual LLM agent in Claude Desktop or Claude Code — see `docs/TESTING_WITH_REAL_AGENTS.md`) runtime verification layer with three independently useful pieces: O(1)-per-event temporal automata grounded in LTL3's three-valued finite-trace semantics, Hoare-style pre/postconditions over a trusted symbolic state store, and a tamper-evident hash-chained evidence log — wired into a live MCP proxy that halts a violating call before it ever reaches the real tool. It is MIT-licensed, self-hosted, and published on PyPI as `acel-core`.
+ACEL is a small, fully-tested (185 passing tests, including a live end-to-end run against the real MCP SDK and a real subprocess, a per-connection session-isolation proof against two simultaneous real client connections, and a second realistic demo server purpose-built for testing against an actual LLM agent in Claude Desktop or Claude Code — see `docs/TESTING_WITH_REAL_AGENTS.md`) runtime verification layer with three independently useful pieces: O(1)-per-event temporal automata grounded in LTL3's three-valued finite-trace semantics, Hoare-style pre/postconditions over a trusted symbolic state store, and a tamper-evident, optionally redacted and persistently signed hash-chained evidence log — wired into a live MCP proxy that halts a violating call before it ever reaches the real tool. It is MIT-licensed, self-hosted, and published on PyPI as `acel-core`.
 
 ### References
 
