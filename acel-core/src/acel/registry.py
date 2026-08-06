@@ -17,6 +17,7 @@ from .temporal import (
     must_precede,
     mutually_exclusive,
     never_after,
+    rate_limit,
     required_before_session_end,
 )
 
@@ -28,6 +29,7 @@ TEMPLATES = {
     "required_before_session_end": required_before_session_end,
     "cannot_follow_without": cannot_follow_without,
     "mutually_exclusive": mutually_exclusive,
+    "rate_limit": rate_limit,
 }
 
 

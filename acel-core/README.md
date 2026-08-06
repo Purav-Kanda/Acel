@@ -71,7 +71,7 @@ except ContractViolation as exc:
     print(v.state_snapshot)  # symbolic state at the moment it broke
 ```
 
-## The seven temporal templates
+## The eight temporal templates
 
 | Template | Meaning |
 | --- | --- |
@@ -82,22 +82,27 @@ except ContractViolation as exc:
 | `required_before_session_end(a)` | `a` must occur at least once before the session ends |
 | `cannot_follow_without(a, b)` | `a` may not occur unless `b` occurred earlier |
 | `mutually_exclusive(a, b)` | `a` and `b` must not both occur in one session |
+| `rate_limit(a, n, window_seconds)` | `a` occurs at most `n` times in any rolling `window_seconds`-second window |
 
-Each template is a deterministic automaton advanced in O(1) per tool call, with
-a three-valued verdict (`SATISFIED` / `VIOLATED` / `UNKNOWN`) over the finite
-trace. `at_most_total` is the odd one out — it's the only template that reads
-call *arguments* rather than just the tool name, since it has to sum a
-numeric field (e.g. a payment amount) across calls. It fails closed: a call
-missing the field, or with a non-numeric value there, is treated as a
-violation rather than silently let through — for a contract whose whole
-purpose is capping spend, silently ignoring an unreadable amount would be the
-actually dangerous failure mode.
+Each template is a deterministic automaton advanced in O(1) (amortized, for
+`rate_limit`) per tool call, with a three-valued verdict (`SATISFIED` /
+`VIOLATED` / `UNKNOWN`) over the finite trace. `at_most_total` and
+`rate_limit` are the two templates that read more than just the tool
+name: `at_most_total` sums a numeric argument field across calls (e.g. a
+payment amount) and fails closed — a call missing the field, or with a
+non-numeric value there, is treated as a violation rather than silently let
+through, since silently ignoring an unreadable amount would be the actually
+dangerous failure mode for a spend cap. `rate_limit` tracks wall-clock
+timestamps of recent matching calls instead of a running session total, so
+it caps *bursts* (calls per minute) rather than a per-session budget — the
+two compose if you want both.
 
 ```python
-from acel import Session, at_most_total
+from acel import Session, at_most_total, rate_limit
 
 session = Session()
 session.add_contract(at_most_total("send_payment", "amount", limit=500))
+session.add_contract(rate_limit("send_payment", n=3, window_seconds=60))
 
 session.call("send_payment", {"amount": 300}, result={"sent": True})
 session.call("send_payment", {"amount": 250}, result={"sent": True})  # raises: 550 > 500

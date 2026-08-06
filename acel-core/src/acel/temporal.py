@@ -16,12 +16,16 @@ Semantics summary (``a``, ``b`` are tool names):
 - ``cannot_follow_without(a, b)``   ``a`` may not occur unless ``b`` occurred earlier
                                      (the dual of ``must_precede(b, a)``).
 - ``mutually_exclusive(a, b)``      ``a`` and ``b`` must not both occur in one session.
+- ``rate_limit(a, n, window_seconds)`` ``a`` occurs at most ``n`` times in any
+                                     rolling ``window_seconds``-second window.
 """
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
-from typing import Any
+from collections import deque
+from typing import Any, Callable
 
 from .verdict import Verdict
 
@@ -269,6 +273,68 @@ class CumulativeLimit(TemporalContract):
         self._total = 0.0
 
 
+class RateLimit(TemporalContract):
+    """``tool`` may be called at most ``n`` times within any rolling
+    ``window_seconds``-second window (e.g. "at most 5 refunds per minute").
+
+    Unlike :class:`AtMostNTimes`, which caps a tool's total count for the
+    whole session, this caps how many calls land in *any* sliding window of
+    wall-clock time — a burst-control rule, not a per-session budget. The
+    two compose: nothing stops you from adding both a per-session cap and a
+    per-minute rate limit on the same tool.
+
+    Implementation: a deque of the timestamps of recent matching calls.
+    Each step drops timestamps older than ``window_seconds`` from the front
+    (they've aged out of the window), then checks whether admitting *this*
+    call would push the count over ``n``. Still O(1) amortized per event —
+    each timestamp is pushed and popped at most once over its lifetime.
+
+    ``clock`` defaults to :func:`time.monotonic` (immune to wall-clock
+    adjustments, correct for measuring elapsed time). Tests inject a fake
+    clock — a zero-argument callable returning an increasing float — so the
+    rate limit's behavior can be checked without actually sleeping.
+    """
+
+    def __init__(
+        self,
+        tool: str,
+        n: int,
+        window_seconds: float,
+        *,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        if n < 1:
+            raise ValueError("n must be at least 1")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        super().__init__(f"rate_limit({tool}, {n} per {window_seconds}s)")
+        self.tool = tool
+        self.n = n
+        self.window_seconds = window_seconds
+        self._clock = clock or time.monotonic
+        self._timestamps: deque[float] = deque()
+
+    def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
+        if tool != self.tool:
+            return Verdict.UNKNOWN if not self._timestamps else Verdict.SATISFIED
+
+        now = self._clock()
+        while self._timestamps and now - self._timestamps[0] > self.window_seconds:
+            self._timestamps.popleft()
+
+        if len(self._timestamps) >= self.n:
+            return Verdict.VIOLATED
+
+        self._timestamps.append(now)
+        return Verdict.SATISFIED
+
+    def _finalize(self) -> Verdict:
+        return Verdict.SATISFIED if self._timestamps else Verdict.UNKNOWN
+
+    def _reset(self) -> None:
+        self._timestamps.clear()
+
+
 # --- public factory functions (the named-template DSL) -----------------
 
 def must_precede(earlier: str, later: str) -> MustPrecede:
@@ -297,3 +363,13 @@ def cannot_follow_without(action: str, prerequisite: str) -> CannotFollowWithout
 
 def mutually_exclusive(a: str, b: str) -> MutuallyExclusive:
     return MutuallyExclusive(a, b)
+
+
+def rate_limit(
+    tool: str,
+    n: int,
+    window_seconds: float,
+    *,
+    clock: Callable[[], float] | None = None,
+) -> RateLimit:
+    return RateLimit(tool, n, window_seconds, clock=clock)

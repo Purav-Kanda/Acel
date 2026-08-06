@@ -3,9 +3,9 @@ correctness: does the monitor catch every violation (recall) and only real
 violations (precision)?
 
 Each Case wires one or more temporal contracts to a trace and states whether
-that trace *should* trigger a violation. Covers all 7 templates with both
+that trace *should* trigger a violation. Covers all 8 templates with both
 passing and violating sequences, plus a few edge cases and multi-contract
-combinations — 59 cases total.
+combinations — 67 cases total.
 """
 
 from __future__ import annotations
@@ -213,6 +213,39 @@ CASES: list[Case] = [
     Case("mutex_08_valid_empty", "mutually_exclusive",
          [{"template": "mutually_exclusive", "args": ["prod_write", "test_write"]}],
          [], False),
+
+    # --- rate_limit(send_payment, n=2, window_seconds=60) ------------------
+    # These run as a fast burst with no real delay between calls, so every
+    # call in a case's trace lands inside the same window by construction —
+    # that's enough to exercise the cardinality check (does N+1 in a window
+    # trip it). Window-*aging* behavior (old calls falling out of the window
+    # over elapsed time) needs a controllable fake clock to test
+    # deterministically without real sleeping — covered in test_templates.py
+    # instead, not here.
+    Case("rate_limit_01_valid_at_limit", "rate_limit",
+         [{"template": "rate_limit", "args": ["send_payment"], "kwargs": {"n": 2, "window_seconds": 60}}],
+         [_t("send_payment"), _t("send_payment")], False),
+    Case("rate_limit_02_valid_under_limit", "rate_limit",
+         [{"template": "rate_limit", "args": ["send_payment"], "kwargs": {"n": 2, "window_seconds": 60}}],
+         [_t("send_payment")], False),
+    Case("rate_limit_03_valid_zero_calls", "rate_limit",
+         [{"template": "rate_limit", "args": ["send_payment"], "kwargs": {"n": 2, "window_seconds": 60}}],
+         [], False),
+    Case("rate_limit_04_violation_over_limit", "rate_limit",
+         [{"template": "rate_limit", "args": ["send_payment"], "kwargs": {"n": 2, "window_seconds": 60}}],
+         [_t("send_payment"), _t("send_payment"), _t("send_payment")], True),
+    Case("rate_limit_05_violation_well_over_limit", "rate_limit",
+         [{"template": "rate_limit", "args": ["send_payment"], "kwargs": {"n": 2, "window_seconds": 60}}],
+         [_t("send_payment"), _t("send_payment"), _t("send_payment"), _t("send_payment")], True),
+    Case("rate_limit_06_valid_ignores_other_tools", "rate_limit",
+         [{"template": "rate_limit", "args": ["send_payment"], "kwargs": {"n": 1, "window_seconds": 60}}],
+         [_t("other"), _t("other"), _t("send_payment")], False),
+    Case("rate_limit_07_valid_interleaved_under_limit", "rate_limit",
+         [{"template": "rate_limit", "args": ["send_payment"], "kwargs": {"n": 2, "window_seconds": 60}}],
+         [_t("send_payment"), _t("other"), _t("send_payment")], False),
+    Case("rate_limit_08_violation_interleaved_over_limit", "rate_limit",
+         [{"template": "rate_limit", "args": ["send_payment"], "kwargs": {"n": 1, "window_seconds": 60}}],
+         [_t("send_payment"), _t("other"), _t("send_payment")], True),
 
     # --- multi-contract combinations ---------------------------------------
     Case("combo_01_both_satisfied", "combo",

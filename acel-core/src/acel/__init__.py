@@ -23,12 +23,13 @@ from .temporal import (
     must_precede,
     mutually_exclusive,
     never_after,
+    rate_limit,
     required_before_session_end,
 )
 from .verdict import Verdict
 from .violations import ContractViolation, Violation
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 __all__ = [
     "__version__",
@@ -59,4 +60,5 @@ __all__ = [
     "required_before_session_end",
     "cannot_follow_without",
     "mutually_exclusive",
+    "rate_limit",
 ]

@@ -311,8 +311,9 @@ _STARTER_CONFIG = """\
 # Load it with `acel validate rules.yaml`, `acel replay trace.json --rules rules.yaml`,
 # or `acel serve your_server.py --contracts rules.yaml`.
 #
-# Templates: must_precede, at_most_n_times, never_after,
-# required_before_session_end, cannot_follow_without, mutually_exclusive.
+# Templates: must_precede, at_most_n_times, at_most_total, never_after,
+# required_before_session_end, cannot_follow_without, mutually_exclusive,
+# rate_limit.
 # Pre/postconditions aren't expressible here on purpose — they need real
 # logic over state, so they stay in your Python tool registration.
 

@@ -11,6 +11,7 @@ from acel.temporal import (
     must_precede,
     mutually_exclusive,
     never_after,
+    rate_limit,
     required_before_session_end,
 )
 from acel.verdict import Verdict
@@ -203,3 +204,85 @@ def test_reset_clears_violation():
     c.reset()
     assert c.verdict is Verdict.UNKNOWN
     assert c.on_event("validate") is Verdict.SATISFIED
+
+
+# --- rate_limit ----------------------------------------------------------
+
+
+class FakeClock:
+    """A controllable clock: advances only when told to, for deterministic
+    rate-limit tests with no real sleeping."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_rate_limit_ok_under_the_cap():
+    c = rate_limit("send_payment", n=3, window_seconds=60, clock=FakeClock())
+    assert run(c, ["send_payment", "send_payment"]) is not Verdict.VIOLATED
+
+
+def test_rate_limit_violation_at_the_nth_plus_one_call():
+    c = rate_limit("send_payment", n=2, window_seconds=60, clock=FakeClock())
+    assert run(c, ["send_payment", "send_payment", "send_payment"]) is Verdict.VIOLATED
+
+
+def test_rate_limit_latches_violation():
+    c = rate_limit("send_payment", n=1, window_seconds=60, clock=FakeClock())
+    c.on_event("send_payment")
+    c.on_event("send_payment")  # violates here
+    assert c.verdict is Verdict.VIOLATED
+    assert c.on_event("read_balance") is Verdict.VIOLATED  # sticky, unrelated tool too
+
+
+def test_rate_limit_old_calls_age_out_of_the_window():
+    clock = FakeClock()
+    c = rate_limit("send_payment", n=1, window_seconds=60, clock=clock)
+    c.on_event("send_payment")
+    clock.advance(61)  # first call is now outside the 60s window
+    assert c.on_event("send_payment") is not Verdict.VIOLATED
+
+
+def test_rate_limit_calls_still_inside_window_still_count():
+    clock = FakeClock()
+    c = rate_limit("send_payment", n=1, window_seconds=60, clock=clock)
+    c.on_event("send_payment")
+    clock.advance(30)  # still inside the 60s window
+    assert c.on_event("send_payment") is Verdict.VIOLATED
+
+
+def test_rate_limit_unrelated_tool_does_not_count():
+    c = rate_limit("send_payment", n=1, window_seconds=60, clock=FakeClock())
+    assert run(c, ["read_balance", "read_balance", "read_balance"]) is not Verdict.VIOLATED
+
+
+def test_rate_limit_defaults_to_real_clock_when_none_given():
+    c = rate_limit("send_payment", n=5, window_seconds=60)
+    assert run(c, ["send_payment"]) is not Verdict.VIOLATED
+
+
+def test_rate_limit_rejects_non_positive_n():
+    with pytest.raises(ValueError):
+        rate_limit("send_payment", n=0, window_seconds=60)
+
+
+def test_rate_limit_rejects_non_positive_window():
+    with pytest.raises(ValueError):
+        rate_limit("send_payment", n=1, window_seconds=0)
+
+
+def test_rate_limit_reset_clears_history():
+    clock = FakeClock()
+    c = rate_limit("send_payment", n=1, window_seconds=60, clock=clock)
+    c.on_event("send_payment")
+    c.on_event("send_payment")
+    assert c.verdict is Verdict.VIOLATED
+    c.reset()
+    assert c.verdict is Verdict.UNKNOWN
+    assert c.on_event("send_payment") is not Verdict.VIOLATED
