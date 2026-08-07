@@ -42,14 +42,29 @@ def load_rules(path: str | Path) -> dict[str, Any]:
         state:
           authenticated: false
 
+        groups:
+          refund_policy:
+            - template: must_precede
+              args: [verify_customer, issue_refund]
+            - template: at_most_total
+              args: [issue_refund, amount]
+              kwargs: {limit: 500}
+
         contracts:
           - template: must_precede
             args: [validate_record, delete_record]
           - template: at_most_n_times
             args: [send_payment]
             kwargs: {n: 1}
+          - group: refund_policy
 
-    Both top-level keys are optional; a file with neither is valid (and useless).
+    ``groups`` is optional and purely organizational: it lets a named
+    bundle of contracts be declared once and pulled into ``contracts`` with
+    ``{"group": "name"}`` instead of repeating the same specs — useful once
+    a server has enough rules that "these five are the refund policy" is
+    worth naming. A group that's declared but never referenced from
+    ``contracts`` has no effect. All three top-level keys are optional; a
+    file with none of them is valid (and useless).
     """
     file_path = Path(path)
     if not file_path.exists():
@@ -88,8 +103,33 @@ def load_rules(path: str | Path) -> dict[str, Any]:
     return data
 
 
+def _group_specs_from_rules(rules: dict[str, Any]) -> dict[str, list[Any]]:
+    """The raw (not-yet-built) contract specs declared under ``groups``."""
+    groups = rules.get("groups", {})
+    if not isinstance(groups, dict):
+        raise ConfigError(f"'groups' must be a mapping, got {type(groups).__name__}")
+    result: dict[str, list[Any]] = {}
+    for name, specs in groups.items():
+        if not isinstance(specs, list):
+            raise ConfigError(f"groups[{name!r}] must be a list, got {type(specs).__name__}")
+        result[name] = specs
+    return result
+
+
 def contracts_from_rules(rules: dict[str, Any]) -> list[TemporalContract]:
-    """Build the list of :class:`TemporalContract` declared under ``contracts``."""
+    """Build the flat list of :class:`TemporalContract` declared under ``contracts``.
+
+    ``contracts`` entries are normally a template spec (``{"template": ...,
+    "args": [...]}``), but an entry may instead be ``{"group": "name"}`` to
+    inline every contract declared under that name in a top-level
+    ``groups:`` mapping — see :func:`load_rules` and
+    :func:`contracts_by_group_from_rules`. Each group reference builds
+    fresh contract instances from the group's specs (never reuses
+    instances across multiple references to the same group), so two
+    ``{"group": "x"}`` entries in one file don't end up sharing mutable
+    automaton state.
+    """
+    group_specs = _group_specs_from_rules(rules)
     specs = rules.get("contracts", [])
     if not isinstance(specs, list):
         raise ConfigError(f"'contracts' must be a list, got {type(specs).__name__}")
@@ -97,11 +137,49 @@ def contracts_from_rules(rules: dict[str, Any]) -> list[TemporalContract]:
     for i, spec in enumerate(specs):
         if not isinstance(spec, dict):
             raise ConfigError(f"contracts[{i}]: expected a mapping, got {type(spec).__name__}")
+        if "group" in spec:
+            group_name = spec["group"]
+            if group_name not in group_specs:
+                raise ConfigError(
+                    f"contracts[{i}]: unknown group {group_name!r}; "
+                    f"declared groups: {sorted(group_specs) or '(none)'}"
+                )
+            for j, group_spec in enumerate(group_specs[group_name]):
+                if not isinstance(group_spec, dict):
+                    raise ConfigError(
+                        f"groups[{group_name!r}][{j}]: expected a mapping, "
+                        f"got {type(group_spec).__name__}"
+                    )
+                try:
+                    contracts.append(build_contract(group_spec))
+                except (ValueError, TypeError) as exc:
+                    raise ConfigError(f"groups[{group_name!r}][{j}]: {exc}") from exc
+            continue
         try:
             contracts.append(build_contract(spec))
         except (ValueError, TypeError) as exc:
             raise ConfigError(f"contracts[{i}]: {exc}") from exc
     return contracts
+
+
+def contracts_by_group_from_rules(rules: dict[str, Any]) -> dict[str, list[TemporalContract]]:
+    """Build every group declared under ``groups``, independent of whether
+    (or how many times) each is referenced from ``contracts``. Mainly for
+    introspection (``acel validate`` uses this to show group membership);
+    building contracts here does not add them to any session."""
+    group_specs = _group_specs_from_rules(rules)
+    built: dict[str, list[TemporalContract]] = {}
+    for name, specs in group_specs.items():
+        contracts = []
+        for j, spec in enumerate(specs):
+            if not isinstance(spec, dict):
+                raise ConfigError(f"groups[{name!r}][{j}]: expected a mapping, got {type(spec).__name__}")
+            try:
+                contracts.append(build_contract(spec))
+            except (ValueError, TypeError) as exc:
+                raise ConfigError(f"groups[{name!r}][{j}]: {exc}") from exc
+        built[name] = contracts
+    return built
 
 
 def state_from_rules(rules: dict[str, Any]) -> dict[str, Any]:

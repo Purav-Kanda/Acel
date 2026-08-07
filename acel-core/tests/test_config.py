@@ -145,3 +145,93 @@ def test_top_level_not_a_mapping_raises_config_error(tmp_path):
     path.write_text("[1, 2, 3]")
     with pytest.raises(config_mod.ConfigError, match="top level must be a mapping"):
         config_mod.load_rules(path)
+
+
+# --- groups --------------------------------------------------------------
+
+GROUPED_RULES = """\
+{
+  "groups": {
+    "refund_policy": [
+      {"template": "must_precede", "args": ["verify_customer", "issue_refund"]},
+      {"template": "at_most_total", "args": ["issue_refund", "amount"], "kwargs": {"limit": 500}}
+    ]
+  },
+  "contracts": [
+    {"template": "must_precede", "args": ["open_ticket", "close_ticket"]},
+    {"group": "refund_policy"}
+  ]
+}
+"""
+
+
+def test_group_reference_expands_into_flat_contracts(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text(GROUPED_RULES)
+
+    rules = config_mod.load_rules(path)
+    contracts = config_mod.contracts_from_rules(rules)
+
+    specs = [c.spec for c in contracts]
+    assert len(specs) == 3
+    assert any("open_ticket" in s for s in specs)
+    assert any("verify_customer" in s for s in specs)
+    assert any("at_most_total" in s for s in specs)
+
+
+def test_contracts_by_group_from_rules_returns_named_bundles(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text(GROUPED_RULES)
+
+    rules = config_mod.load_rules(path)
+    groups = config_mod.contracts_by_group_from_rules(rules)
+
+    assert set(groups) == {"refund_policy"}
+    assert len(groups["refund_policy"]) == 2
+    specs = [c.spec for c in groups["refund_policy"]]
+    assert any("verify_customer" in s for s in specs)
+    assert any("at_most_total" in s for s in specs)
+
+
+def test_declared_but_unreferenced_group_has_no_effect(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text(
+        '{"groups": {"unused": [{"template": "must_precede", "args": ["a", "b"]}]}, '
+        '"contracts": []}'
+    )
+    rules = config_mod.load_rules(path)
+    assert config_mod.contracts_from_rules(rules) == []
+    assert list(config_mod.contracts_by_group_from_rules(rules)) == ["unused"]
+
+
+def test_unknown_group_reference_raises_config_error(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text('{"contracts": [{"group": "does_not_exist"}]}')
+    with pytest.raises(config_mod.ConfigError, match="unknown group"):
+        config_mod.contracts_from_rules(config_mod.load_rules(path))
+
+
+def test_two_references_to_same_group_get_independent_instances(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text(
+        '{"groups": {"g": [{"template": "at_most_n_times", "args": ["pay"], "kwargs": {"n": 1}}]}, '
+        '"contracts": [{"group": "g"}, {"group": "g"}]}'
+    )
+    rules = config_mod.load_rules(path)
+    contracts = config_mod.contracts_from_rules(rules)
+    assert len(contracts) == 2
+    assert contracts[0] is not contracts[1]  # independent automaton state, not shared
+
+
+def test_groups_not_a_mapping_raises_config_error(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text('{"groups": ["nope"]}')
+    with pytest.raises(config_mod.ConfigError, match="'groups' must be a mapping"):
+        config_mod.contracts_from_rules(config_mod.load_rules(path))
+
+
+def test_group_specs_not_a_list_raises_config_error(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text('{"groups": {"g": "nope"}}')
+    with pytest.raises(config_mod.ConfigError, match=r"groups\['g'\] must be a list"):
+        config_mod.contracts_from_rules(config_mod.load_rules(path))

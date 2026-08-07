@@ -13,6 +13,7 @@ from __future__ import annotations
 from .conditions import Check, postcondition, precondition
 from .events import ToolCallEvent
 from .evidence import EvidenceBundle, EvidenceLog, ed25519_signer, redact_violation
+from .metrics import Metrics, serve_metrics_http
 from .session import Gate, Session, ToolSpec
 from .state import StateStore
 from .temporal import (
@@ -29,7 +30,7 @@ from .temporal import (
 from .verdict import Verdict
 from .violations import ContractViolation, Violation
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 
 __all__ = [
     "__version__",
@@ -47,6 +48,8 @@ __all__ = [
     "EvidenceBundle",
     "ed25519_signer",
     "redact_violation",
+    "Metrics",
+    "serve_metrics_http",
     # conditions
     "precondition",
     "postcondition",

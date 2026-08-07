@@ -95,6 +95,36 @@ def test_init_config_default_path(tmp_path, monkeypatch):
     assert (tmp_path / "rules.yaml").exists()
 
 
+def test_validate_shows_group_membership(tmp_path, capsys):
+    path = tmp_path / "rules.json"
+    path.write_text(
+        '{"groups": {"refund_policy": ['
+        '{"template": "must_precede", "args": ["verify_customer", "issue_refund"]}'
+        ']}, "contracts": [{"group": "refund_policy"}]}'
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(["validate", str(path)])
+    exit_code = args.func(args)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Groups (1):" in out
+    assert "refund_policy" in out
+    assert "verify_customer" in out
+
+
+def test_validate_omits_groups_section_when_none_declared(tmp_path, capsys):
+    path = tmp_path / "rules.json"
+    path.write_text(VALID_RULES)
+
+    parser = build_parser()
+    args = parser.parse_args(["validate", str(path)])
+    args.func(args)
+
+    assert "Groups" not in capsys.readouterr().out
+
+
 def test_serve_contracts_flag_layers_extra_contracts(tmp_path):
     pytest.importorskip("mcp")
     rules_path = tmp_path / "extra.json"

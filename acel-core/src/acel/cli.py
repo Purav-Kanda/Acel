@@ -291,6 +291,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         rules = config_mod.load_rules(args.rules)
         contracts = config_mod.contracts_from_rules(rules)
         state = config_mod.state_from_rules(rules)
+        groups = config_mod.contracts_by_group_from_rules(rules)
     except config_mod.ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -303,6 +304,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"Contracts ({len(contracts)}):")
         for c in contracts:
             print(f"  - {c.spec}")
+    if groups:
+        print(f"Groups ({len(groups)}):")
+        for name, group_contracts in groups.items():
+            print(f"  - {name} ({len(group_contracts)}):")
+            for c in group_contracts:
+                print(f"      - {c.spec}")
     return 0
 
 
@@ -316,9 +323,22 @@ _STARTER_CONFIG = """\
 # rate_limit.
 # Pre/postconditions aren't expressible here on purpose — they need real
 # logic over state, so they stay in your Python tool registration.
+#
+# `groups` is optional: name a reusable bundle of contracts once, then pull
+# it into `contracts` with `{group: name}` instead of repeating the specs —
+# worth it once you have enough rules that "these are the refund policy"
+# is worth naming. Delete the `groups` section if you don't need it.
 
 state:
   authenticated: false
+
+groups:
+  refund_policy:
+    - template: must_precede
+      args: [verify_customer, issue_refund]
+    - template: at_most_total
+      args: [issue_refund, amount]
+      kwargs: {limit: 500}
 
 contracts:
   - template: must_precede
@@ -326,6 +346,7 @@ contracts:
   - template: at_most_n_times
     args: [send_payment]
     kwargs: {n: 1}
+  - group: refund_policy
 """
 
 

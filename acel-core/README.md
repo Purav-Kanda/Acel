@@ -268,6 +268,46 @@ file is just constructing an object from validated data, no code execution
 involved. Pre/postconditions stay in Python, wired directly to your tools —
 install YAML support with `pip install "acel-core[config]"`.
 
+### Naming a bundle of contracts as a group
+
+Purely organizational — a group isn't a new kind of contract or a change to
+enforcement, it's a name for a bundle of contracts you keep referring to
+together. Worth it once a server has enough rules that "these three are the
+refund policy" is worth saying out loud:
+
+```python
+session = Session()
+session.add_contract_group("refund_policy", [
+    must_precede("verify_customer", "issue_refund"),
+    at_most_total("issue_refund", "amount", limit=500),
+])
+
+session.groups                        # {"refund_policy": [...]}
+session.contracts_in_group("refund_policy")
+```
+
+Or declare it once in a rules file and pull it into `contracts` wherever
+it's needed with `{group: name}`:
+
+```yaml
+groups:
+  refund_policy:
+    - template: must_precede
+      args: [verify_customer, issue_refund]
+    - template: at_most_total
+      args: [issue_refund, amount]
+      kwargs: {limit: 500}
+
+contracts:
+  - template: must_precede
+    args: [open_ticket, close_ticket]
+  - group: refund_policy
+```
+
+`acel validate` shows group membership alongside the flat contract list. A
+group declared but never referenced from `contracts` has no effect — it's
+inert until something pulls it in.
+
 ## Verifying evidence for tampering
 
 Every violation is recorded as a tamper-evident, hash-chained bundle. Save
@@ -316,6 +356,67 @@ ACEL Evidence Log — evidence.json
 just the offending call; drop it for a shorter summary. If the chain is
 broken, `acel show` marks the exact bundle where it happened the same way
 `acel verify` does.
+
+## Metrics
+
+Opt in to Prometheus-style metrics by passing a `Metrics` instance to `Session`:
+
+```python
+from acel import Session, Metrics, must_precede
+
+metrics = Metrics()
+session = Session(metrics=metrics)
+session.add_contract(must_precede("validate_record", "delete_record"))
+
+# ... handle real traffic ...
+
+print(metrics.render_prometheus())
+```
+
+Tracks call volume, gate latency (the same thing `benchmarks/latency.py`
+measures offline, but live from your own traffic), and violation counts —
+both overall by kind and broken down per contract, so you can see *which*
+rule is actually tripping in production, not just that something did:
+
+```
+acel_calls_total 142
+
+acel_violations_total{kind="temporal"} 3
+acel_violations_total{kind="precondition"} 1
+acel_violations_total{kind="postcondition"} 0
+
+acel_contract_violations_total{contract="must_precede(validate_record, delete_record)"} 3
+
+acel_gate_latency_seconds_count 142
+acel_gate_latency_seconds_sum 0.000312
+```
+
+`render_prometheus()` just returns a string — serve it however fits your
+deployment (a `/metrics` route on whatever web framework fronts your
+server, a sidecar, a log line). If you don't already have an HTTP server to
+hang a route off of, `serve_metrics_http(metrics, port=9090)` starts a
+minimal stdlib-only one for you. Entirely opt-in: leave `metrics` unset and
+none of this bookkeeping runs.
+
+## Concurrency
+
+A `Session` is safe to call from more than one thread or async task at
+once. Every method that mutates shared state (`call`, `precheck`,
+`postcheck`, `replay`, `end_session`) is guarded by an internal
+`threading.RLock`, so concurrent callers can't corrupt a contract's
+internal counters, the step counter, or the trace — verified with real
+`ThreadPoolExecutor`-driven tests firing dozens of concurrent calls at a
+shared `at_most_n_times`/`at_most_total`/`rate_limit` contract and checking
+for lost updates (`tests/test_concurrency.py`). The lock is never held
+across an `await`: the MCP middleware's `precheck()` → *(real tool
+runs, unguarded)* → `postcheck()` split exists specifically so a slow tool
+call doesn't serialize every other in-flight request on the same
+connection.
+
+This is about safety within *one* `Session`, not about sharing one
+`Session` across multiple clients — for that, see multi-tenant
+`session_factory` support above, which gives each connection its own
+fully isolated `Session` in the first place.
 
 ## Security notes
 
