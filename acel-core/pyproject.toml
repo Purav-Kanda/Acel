@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "acel-core"
-version = "0.1.8"
+version = "0.1.9"
 description = "Agent Contract Enforcement Layer — runtime verification of AI agent tool calls (core monitor)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,7 @@ dev = ["pytest>=8.0", "hypothesis>=6.0"]
 sign = ["cryptography>=42.0"]
 mcp = ["mcp>=2.0"]
 config = ["pyyaml>=6.0"]
+langchain = ["langchain-core>=0.3"]
 
 [project.scripts]
 acel = "acel.cli:main"

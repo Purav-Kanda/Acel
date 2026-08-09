@@ -133,6 +133,41 @@ violations = session.replay([
 ])
 ```
 
+## Using ACEL outside MCP: LangChain, OpenAI function calling, or anything else
+
+`Session.call()` is already framework-agnostic — MCP is just one caller of
+it, not a requirement. `acel.adapters` has two small helpers that save you
+the boilerplate of matching a specific framework's tool-call shape onto it:
+
+```python
+from acel import Session, must_precede
+from acel.adapters import guard
+
+session = Session()
+session.add_contract(must_precede("validate_record", "delete_record"))
+
+# Wrap a plain function (a LangChain tool's `func=`, a dispatch-table
+# callable, anything called as `the_tool(**kwargs)`) so every invocation
+# is gated first — same enforcement, same evidence log, no MCP involved.
+guarded_delete = guard(session, "delete_record", delete_record)
+```
+
+For a hand-rolled agent loop around an OpenAI-compatible chat completions
+API, `guard_openai_tool_call` gates a raw `tool_calls[i]` entry directly:
+
+```python
+from acel.adapters import guard_openai_tool_call
+
+for tool_call in response.choices[0].message.tool_calls:
+    result = guard_openai_tool_call(session, tool_call, TOOLS[tool_call.function.name])
+```
+
+Full runnable demos: `examples/langchain_agent_example.py` (requires
+`pip install "acel-core[langchain]"`) and
+`examples/openai_function_calling_example.py` (no extra dependency, no API
+key needed to run it — uses hand-built `tool_calls` dicts shaped like the
+real API's response).
+
 ## Live MCP proxy (Phase 2)
 
 ACEL can gate a **real** MCP server's tool calls, live, via the official MCP
