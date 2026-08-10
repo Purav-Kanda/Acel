@@ -92,8 +92,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print(f"OK — {args.evidence_file} contains 0 bundles (nothing to verify).")
         return 0
 
+    if not args.public_key:
+        print(
+            "warning: verifying hash-chain linkage only, no --public-key given. "
+            "Anyone who can edit this file can also recompute the hash chain, so this "
+            "checks internal consistency, not authenticity. Pass --public-key to also "
+            "require a valid Ed25519 signature on every bundle.",
+            file=sys.stderr,
+        )
+
     try:
-        ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles)
+        ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles, public_key_hex=args.public_key)
     except (KeyError, TypeError) as exc:
         print(
             f"error: {args.evidence_file!r} doesn't look like a valid evidence log "
@@ -101,15 +110,26 @@ def cmd_verify(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    except ImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"error: --public-key doesn't look like a valid Ed25519 public key: {exc}", file=sys.stderr)
+        return 2
 
     if ok:
-        print(f"OK — {len(bundles)} bundle(s) verified. Hash chain is intact, no tampering detected.")
+        suffix = " and every signature checks out" if args.public_key else ""
+        print(f"OK — {len(bundles)} bundle(s) verified. Hash chain is intact{suffix}, no tampering detected.")
         return 0
 
+    reason = (
+        "its hash doesn't match its own recomputed content, it doesn't link to the "
+        "previous bundle correctly, or (if --public-key was given) its signature "
+        "is missing or invalid"
+    )
     print(
         f"FAIL — tampering detected. Bundle {bad_index} (of {len(bundles)}) is the first to "
-        f"break the chain — its hash doesn't match its own recomputed content, or it doesn't "
-        f"link to the previous bundle correctly. Everything from bundle {bad_index} onward "
+        f"break the chain — {reason}. Everything from bundle {bad_index} onward "
         f"cannot be trusted.",
         file=sys.stderr,
     )
@@ -149,7 +169,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles)
+        ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles, public_key_hex=args.public_key)
     except (KeyError, TypeError) as exc:
         print(
             f"error: {args.evidence_file!r} doesn't look like a valid evidence log "
@@ -157,8 +177,17 @@ def cmd_show(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    except ImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"error: --public-key doesn't look like a valid Ed25519 public key: {exc}", file=sys.stderr)
+        return 2
 
-    chain_status = "chain OK" if ok else f"CHAIN BROKEN at bundle {bad_index}"
+    if args.public_key:
+        chain_status = "chain + signatures OK" if ok else f"BROKEN at bundle {bad_index} (chain or signature)"
+    else:
+        chain_status = "chain OK (no --public-key given — hash linkage only, not authenticity)" if ok else f"CHAIN BROKEN at bundle {bad_index}"
     print(f"ACEL Evidence Log — {args.evidence_file}")
     print(f"{len(bundles)} bundle(s), {chain_status}\n")
 
@@ -190,7 +219,15 @@ def cmd_show(args: argparse.Namespace) -> int:
                     f"({_compact_json(entry.get('args', {}))}) -> "
                     f"{_compact_json(entry.get('result'))}"
                 )
-        signed = "signed" if bundle.get("signature") else "unsigned"
+        if args.public_key:
+            if ok or i < bad_index:
+                signed = "signature verified"
+            elif i == bad_index:
+                signed = "signature INVALID or missing (or chain broke here)"
+            else:
+                signed = "not checked — chain already broken earlier"
+        else:
+            signed = "signature present (unverified — pass --public-key to check it)" if bundle.get("signature") else "unsigned"
         print(f"    hash:     {_short_hash(bundle.get('bundle_hash', '?'))}  ({signed})")
         print()
 
@@ -389,6 +426,13 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument(
         "evidence_file", help="Path to a JSON file containing a list of evidence bundles."
     )
+    verify.add_argument(
+        "--public-key",
+        metavar="HEX",
+        help="Ed25519 public key (hex, as printed when the log was signed) to also verify "
+        "each bundle's signature — without this, only hash-chain linkage is checked, "
+        "which proves internal consistency but not authenticity.",
+    )
     verify.set_defaults(func=cmd_verify)
 
     show = sub.add_parser(
@@ -401,6 +445,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--trace",
         action="store_true",
         help="Also print the full call trace leading up to each violation.",
+    )
+    show.add_argument(
+        "--public-key",
+        metavar="HEX",
+        help="Ed25519 public key (hex) to also verify each bundle's signature, not just "
+        "hash-chain linkage.",
     )
     show.set_defaults(func=cmd_show)
 

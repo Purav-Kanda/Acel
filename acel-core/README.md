@@ -358,6 +358,20 @@ acel verify evidence.json
 OK — 3 bundle(s) verified. Hash chain is intact, no tampering detected.
 ```
 
+That checks hash-chain *consistency* — SHA-256 is unkeyed, so on its own it
+can't prove *authenticity* against someone who can edit the file (they can
+just recompute the hashes too). If you signed the log (`ed25519_signer`,
+see Security notes below), always pass the public key to actually check
+the signature:
+
+```bash
+acel verify evidence.json --public-key 4f2e...c19a
+```
+
+```
+OK — 3 bundle(s) verified. Hash chain is intact and every signature checks out, no tampering detected.
+```
+
 If any field in any bundle was altered after the fact, `acel verify` fails
 and reports the exact bundle index where the chain first breaks — everything
 from that point onward is untrustworthy, but pinpointing *where* it broke is
@@ -472,10 +486,19 @@ fully isolated `Session` in the first place.
 
   Two redacted entries with the same original value still produce the same
   marker (so "this session reused the same token twice" stays visible to an
-  auditor), but the marker never reveals the plaintext. Fields you don't
-  list are left alone, so still prefer keeping secrets out of tool
-  *arguments* entirely where you can — pass a reference/ID and resolve the
-  real secret inside your own tool implementation instead.
+  auditor). The marker is an **HMAC-SHA256 keyed with a random, in-memory-only
+  key** that `EvidenceLog` generates once and never writes to the log —
+  recovering the original value from the marker requires that key, so an
+  attacker who only has the evidence log (the threat this feature defends
+  against) can't dictionary-attack it offline, even for a short/guessable
+  value like a PIN. (If you call `redact_violation()` directly without going
+  through `Session`/`EvidenceLog`, it defaults to an *unkeyed* SHA-256 marker
+  instead — safe for correlation and for high-entropy secrets, but
+  brute-forceable for low-entropy ones; pass your own `key=` bytes if you
+  need the same protection outside `EvidenceLog`.) Fields you don't list are
+  left alone, so still prefer keeping secrets out of tool *arguments*
+  entirely where you can — pass a reference/ID and resolve the real secret
+  inside your own tool implementation instead.
 - **`ed25519_signer()` can persist its key, or stay ephemeral — your
   choice.** Called with no arguments, it generates a fresh, unpersisted key
   every time (fine for signing within one process's lifetime, but restart
@@ -493,6 +516,37 @@ fully isolated `Session` in the first place.
   Treat that key file exactly like an SSH private key: back it up if you
   need old signatures to keep verifying, and never commit it to a repo or
   evidence log.
+- **The hash chain alone proves consistency, not authenticity — always
+  verify with the public key if signing is enabled.** `EvidenceLog.verify()`
+  and `acel verify`/`acel show` recompute SHA-256 hash links, which is
+  enough to catch accidental corruption, but SHA-256 is an unkeyed function:
+  anyone who can edit the evidence-log file can also recompute every hash
+  from an edited bundle onward, and the chain will still "verify" with no
+  key required. If you're signing evidence (see above), always pass the
+  public key so the signature is actually checked, not just its presence:
+
+  ```bash
+  acel verify evidence.json --public-key <hex from ed25519_signer>
+  acel show evidence.json --public-key <hex from ed25519_signer>
+  ```
+
+  Without `--public-key`, both commands still run and print a warning —
+  useful for a quick corruption check, but it is not tamper-evidence against
+  a party who can write to the file.
+- **State-based preconditions are not safe against concurrent/pipelined
+  calls to the same tool — use temporal contracts for anything that needs
+  to hold under concurrency.** A precondition only reads `session.state`;
+  the state isn't updated until `postcheck` commits it, after the real tool
+  has run. If a client has two calls to the same tool in flight at once
+  (which MCP allows, and which `Session` supports via its
+  `precheck`/`postcheck` split), both can read the same pre-commit state and
+  both pass — so a precondition like `lambda s: s["balance"] >= amount` can
+  let two concurrent calls both pass against a balance that should only
+  cover one of them. Temporal contracts (`at_most_total`, `rate_limit`,
+  `at_most_n_times`) don't have this gap, because their counters are
+  mutated synchronously under the lock during `precheck` itself — express
+  spend caps, quantity limits, and rate limits as temporal contracts, not as
+  a hand-written precondition, if concurrent calls are possible.
 - **Config files (`--rules`, `--contracts`) are parsed with `yaml.safe_load`
   and `json.loads` only** — never `yaml.load` or `eval`. There is no code
   execution path from a rules file; that's exactly why pre/postconditions

@@ -137,6 +137,36 @@ def test_show_subcommand_registered():
     assert args.trace is False
 
 
+def test_show_subcommand_default_public_key_is_none():
+    parser = build_parser()
+    args = parser.parse_args(["show", "some_file.json"])
+    assert args.public_key is None
+
+
+def test_show_with_public_key_reports_verified_signature(tmp_path, capsys):
+    import pytest
+
+    pytest.importorskip("cryptography")
+    from acel import Session, must_precede
+    from acel.evidence import ed25519_signer
+
+    sign, pub = ed25519_signer()
+    session = Session(halt_on_violation=False, signer=sign)
+    session.add_contract(must_precede("validate", "delete"))
+    session.call("delete", {"id": "1"})
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(session.evidence.to_json())
+
+    parser = build_parser()
+    args = parser.parse_args(["show", str(evidence_path), "--public-key", pub])
+    exit_code = args.func(args)
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "chain + signatures OK" in out
+    assert "signature verified" in out
+
+
 def test_show_redacted_evidence_still_renders(tmp_path, capsys):
     from acel import Session, must_precede
 

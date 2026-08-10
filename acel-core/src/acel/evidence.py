@@ -21,15 +21,21 @@ sensitive without you telling it — but you can tell it: pass
 ``redact_fields={"password", "api_key", ...}`` to :class:`EvidenceLog` (or
 to :class:`~acel.session.Session`) and any dict key matching one of those
 names, anywhere in the bundle's args/result/trace/state_snapshot (including
-nested), is replaced with a short, non-reversible hash marker instead of the
-real value before the bundle is ever hashed or written. See
-:func:`redact_violation` for the redaction rule itself.
+nested), is replaced with a short marker instead of the real value before
+the bundle is ever hashed or written. That marker is an HMAC keyed with a
+random, in-memory-only key (never written to the log itself) — recovering
+the original value from the marker requires that key, which an attacker who
+only has the evidence log doesn't have. See :func:`redact_violation` for the
+redaction rule itself, and its docstring for what changes if you call it
+directly without a key.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,34 +62,55 @@ def _payload_of(index: int, timestamp: str, violation: dict[str, Any]) -> dict[s
     return {"index": index, "timestamp": timestamp, "violation": violation}
 
 
-def _redact_marker(value: Any) -> str:
-    """A short, non-reversible stand-in for a redacted value.
+def _redact_marker(value: Any, key: bytes | None = None) -> str:
+    """A short stand-in for a redacted value.
 
-    Hashing (rather than just writing ``"***REDACTED***"``) means two
+    Hashing/MACing (rather than just writing ``"***REDACTED***"``) means two
     redacted entries that came from the *same* original value still look
     identical to an auditor — e.g. "this session used the same API key in
-    calls 3 and 7" is still visible — without the plaintext ever being
-    recoverable from the marker.
+    calls 3 and 7" is still visible — without the plaintext appearing
+    directly in the marker.
+
+    **Pass ``key``** (random bytes, generated once and never written to the
+    evidence log) to compute an HMAC-SHA256 marker instead of a plain
+    SHA-256 one. This is what :class:`EvidenceLog` does automatically. A
+    plain, unkeyed SHA-256 marker (``key=None``, the default for direct
+    calls to :func:`redact_violation`) is only safe against *offline
+    dictionary/brute-force recovery* for high-entropy values — for anything
+    guessable (a short PIN, a common password, a predictable token) an
+    attacker who obtains the evidence log can recompute
+    ``sha256({"v": candidate})`` for every candidate locally, with no rate
+    limiting, and match it against the marker. An HMAC keyed with a secret
+    not present in the log closes that off, since the attacker can no
+    longer recompute the marker without the key.
     """
+    if key is not None:
+        digest = hmac.new(key, _canonical({"v": value}), hashlib.sha256).hexdigest()[:16]
+        return f"***REDACTED(hmac-sha256:{digest})***"
     digest = _sha256_hex(_canonical({"v": value}))[:16]
     return f"***REDACTED(sha256:{digest})***"
 
 
-def _redact_tree(node: Any, fields_lower: set[str]) -> Any:
+def _redact_tree(node: Any, fields_lower: set[str], key: bytes | None) -> Any:
     """Recursively replace any dict value whose key matches ``fields_lower``
     (case-insensitively) with a redaction marker, walking into nested dicts
     and lists (including lists of dicts, e.g. a violation's ``trace``)."""
     if isinstance(node, dict):
         return {
-            key: _redact_marker(value) if key.lower() in fields_lower else _redact_tree(value, fields_lower)
-            for key, value in node.items()
+            k: _redact_marker(v, key) if k.lower() in fields_lower else _redact_tree(v, fields_lower, key)
+            for k, v in node.items()
         }
     if isinstance(node, list):
-        return [_redact_tree(item, fields_lower) for item in node]
+        return [_redact_tree(item, fields_lower, key) for item in node]
     return node
 
 
-def redact_violation(violation: dict[str, Any], fields: Iterable[str]) -> dict[str, Any]:
+def redact_violation(
+    violation: dict[str, Any],
+    fields: Iterable[str],
+    *,
+    key: bytes | None = None,
+) -> dict[str, Any]:
     """Return a copy of a violation dict with sensitive fields masked.
 
     ``fields`` is a set of dict-key names (matched case-insensitively) to
@@ -92,14 +119,22 @@ def redact_violation(violation: dict[str, Any], fields: Iterable[str]) -> dict[s
     per-call dicts inside ``trace``. Everything else (``kind``, ``spec``,
     ``tool``, ``step``) is left untouched since none of it can carry
     arbitrary user data.
+
+    Pass ``key`` (random bytes, kept secret and never stored alongside the
+    output) to mask with an HMAC keyed by it instead of a plain unkeyed
+    hash — see :func:`_redact_marker` for why this matters for low-entropy
+    values like short passwords or PINs. :class:`EvidenceLog` generates and
+    uses such a key automatically; call this function directly without
+    ``key`` only if you understand that tradeoff (e.g. you're redacting
+    high-entropy secrets, or you only need correlation, not confidentiality).
     """
     fields_lower = {f.lower() for f in fields}
     if not fields_lower:
         return dict(violation)
     redacted = dict(violation)
-    for key in ("args", "result", "state_snapshot", "trace"):
-        if key in redacted:
-            redacted[key] = _redact_tree(redacted[key], fields_lower)
+    for k in ("args", "result", "state_snapshot", "trace"):
+        if k in redacted:
+            redacted[k] = _redact_tree(redacted[k], fields_lower, key)
     return redacted
 
 
@@ -131,6 +166,10 @@ class EvidenceLog:
         self._bundles: list[EvidenceBundle] = []
         self._signer = signer
         self._redact_fields = set(redact_fields) if redact_fields else None
+        # Generated once per log, kept only in memory, never written to the
+        # evidence log itself — this is what makes redaction markers an HMAC
+        # rather than a plain unkeyed hash (see _redact_marker's docstring).
+        self._redact_key = secrets.token_bytes(32) if self._redact_fields else None
 
     @property
     def bundles(self) -> list[EvidenceBundle]:
@@ -153,7 +192,7 @@ class EvidenceLog:
         timestamp = datetime.now(timezone.utc).isoformat()
         violation_dict = violation.to_dict()
         if self._redact_fields:
-            violation_dict = redact_violation(violation_dict, self._redact_fields)
+            violation_dict = redact_violation(violation_dict, self._redact_fields, key=self._redact_key)
         payload = _payload_of(index, timestamp, violation_dict)
         trace_hash = _sha256_hex(_canonical(payload))
         bundle_hash = _sha256_hex((prev_hash + trace_hash).encode())
@@ -170,25 +209,47 @@ class EvidenceLog:
         self._bundles.append(bundle)
         return bundle
 
-    def verify(self) -> bool:
-        """Return True if the current in-memory chain is internally consistent."""
-        return self.verify_bundles([b.to_dict() for b in self._bundles])
+    def verify(self, *, public_key_hex: str | None = None) -> bool:
+        """Return True if the current in-memory chain is internally consistent.
+
+        Pass ``public_key_hex`` to also require a valid Ed25519 signature on
+        every bundle — see :meth:`verify_bundles_detailed` for why the hash
+        chain alone doesn't prove authenticity.
+        """
+        return self.verify_bundles([b.to_dict() for b in self._bundles], public_key_hex=public_key_hex)
 
     def to_json(self) -> str:
         return json.dumps([b.to_dict() for b in self._bundles], indent=2, default=str)
 
     @staticmethod
-    def verify_bundles(bundles: list[dict[str, Any]]) -> bool:
+    def verify_bundles(
+        bundles: list[dict[str, Any]],
+        *,
+        public_key_hex: str | None = None,
+    ) -> bool:
         """Verify a list of bundle dicts (e.g. loaded from disk) for tampering.
 
         Recomputes every hash from the payloads and checks the chain links.
         Any altered field anywhere in the history makes this return False.
+
+        Pass ``public_key_hex`` (the hex string returned by
+        :func:`ed25519_signer`) to also check each bundle's Ed25519
+        ``signature`` field against that key — without it, a forged bundle
+        with hashes recomputed to match its edited content still verifies,
+        since the hash chain alone is a public, unkeyed function that
+        anyone with write access to the file can recompute. See
+        :meth:`verify_bundles_detailed` for what "signature missing" means
+        when a key *is* supplied.
         """
-        ok, _ = EvidenceLog.verify_bundles_detailed(bundles)
+        ok, _ = EvidenceLog.verify_bundles_detailed(bundles, public_key_hex=public_key_hex)
         return ok
 
     @staticmethod
-    def verify_bundles_detailed(bundles: list[dict[str, Any]]) -> tuple[bool, int | None]:
+    def verify_bundles_detailed(
+        bundles: list[dict[str, Any]],
+        *,
+        public_key_hex: str | None = None,
+    ) -> tuple[bool, int | None]:
         """Like :meth:`verify_bundles`, but also reports *where* the chain broke.
 
         Returns ``(True, None)`` if every bundle checks out, or ``(False, i)``
@@ -196,7 +257,18 @@ class EvidenceLog:
         because the chain is cumulative, everything after that point is
         untrustworthy too, but the *first* break is what tells you where the
         tampering (or corruption) actually happened.
+
+        Without ``public_key_hex``, this only checks hash-chain linkage —
+        that's consistency, not authenticity: SHA-256 is unkeyed, so anyone
+        who can edit the evidence file can also recompute every hash from
+        that point forward and the chain will still "verify". Pass
+        ``public_key_hex`` (from :func:`ed25519_signer`) to additionally
+        require that every bundle carries a valid Ed25519 signature over its
+        ``bundle_hash`` — a bundle with a missing, malformed, or invalid
+        signature then fails verification at that index, the same as a
+        broken hash link.
         """
+        verify_signature = _ed25519_verifier(public_key_hex) if public_key_hex else None
         prev = GENESIS_HASH
         for i, bundle in enumerate(bundles):
             payload = _payload_of(bundle["index"], bundle["timestamp"], bundle["violation"])
@@ -205,10 +277,47 @@ class EvidenceLog:
                 return False, i
             if bundle["prev_hash"] != prev:
                 return False, i
-            if _sha256_hex((prev + trace_hash).encode()) != bundle["bundle_hash"]:
+            bundle_hash = _sha256_hex((prev + trace_hash).encode())
+            if bundle_hash != bundle["bundle_hash"]:
                 return False, i
-            prev = bundle["bundle_hash"]
+            if verify_signature is not None:
+                signature = bundle.get("signature")
+                if not signature or not verify_signature(bundle_hash, signature):
+                    return False, i
+            prev = bundle_hash
         return True, None
+
+
+def _ed25519_verifier(public_key_hex: str) -> Callable[[str, str], bool]:
+    """Build a ``(bundle_hash_hex, signature_hex) -> bool`` checker for one
+    Ed25519 public key. Requires the optional ``cryptography`` dependency —
+    raises ImportError if it isn't installed, same as :func:`ed25519_signer`.
+    """
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PublicKey,
+        )
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError(
+            "Verifying Ed25519 signatures requires the 'cryptography' package. "
+            "Install it with: pip install cryptography"
+        ) from exc
+
+    public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
+
+    def verify(bundle_hash_hex: str, signature_hex: str) -> bool:
+        try:
+            signature = bytes.fromhex(signature_hex)
+        except ValueError:
+            return False
+        try:
+            public_key.verify(signature, bundle_hash_hex.encode())
+            return True
+        except InvalidSignature:
+            return False
+
+    return verify
 
 
 def ed25519_signer(key_path: str | Path | None = None) -> tuple[Signer, str]:

@@ -263,3 +263,148 @@ def test_ed25519_signer_key_file_is_owner_only(tmp_path):
     ed25519_signer(key_file)
     mode = stat.S_IMODE(key_file.stat().st_mode)
     assert mode == 0o600
+
+
+# ---------------------------------------------------------------------------
+# Signature verification (security fix: hash chain alone is not authenticity)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_without_public_key_still_passes_a_forged_but_recomputed_chain():
+    """Documents the known limitation: hash-only verification can't catch a
+    forgery where the attacker also recomputes every downstream hash — this
+    is exactly why --public-key / public_key_hex exists."""
+    pytest.importorskip("cryptography")
+    from acel.evidence import ed25519_signer
+
+    sign, _pub = ed25519_signer()
+    log = EvidenceLog(signer=sign)
+    log.record(_violation(1))
+    bundles = [b.to_dict() for b in log.bundles]
+
+    # Forge bundle 0's violation, then recompute its hashes by hand (what an
+    # attacker with file write access can trivially do, with no key needed).
+    forged = copy.deepcopy(bundles)
+    forged[0]["violation"]["spec"] = "must_precede(a, c)"
+    from acel.evidence import _canonical, _payload_of, _sha256_hex
+
+    payload = _payload_of(forged[0]["index"], forged[0]["timestamp"], forged[0]["violation"])
+    forged[0]["trace_hash"] = _sha256_hex(_canonical(payload))
+    forged[0]["bundle_hash"] = _sha256_hex((forged[0]["prev_hash"] + forged[0]["trace_hash"]).encode())
+    forged[0]["signature"] = "not-a-real-signature"
+
+    # Hash-chain-only verification is fooled...
+    assert EvidenceLog.verify_bundles(forged) is True
+    # ...but signature verification catches it.
+    assert EvidenceLog.verify_bundles(forged, public_key_hex=_pub) is False
+
+
+def test_verify_with_public_key_passes_a_genuinely_untampered_signed_log():
+    pytest.importorskip("cryptography")
+    from acel.evidence import ed25519_signer
+
+    sign, pub = ed25519_signer()
+    log = EvidenceLog(signer=sign)
+    log.record(_violation(1))
+    log.record(_violation(2))
+    bundles = [b.to_dict() for b in log.bundles]
+
+    assert EvidenceLog.verify_bundles(bundles, public_key_hex=pub) is True
+    assert log.verify(public_key_hex=pub) is True
+
+
+def test_verify_with_public_key_fails_on_missing_signature():
+    pytest.importorskip("cryptography")
+    from acel.evidence import ed25519_signer
+
+    sign, pub = ed25519_signer()
+    log = EvidenceLog(signer=sign)
+    log.record(_violation(1))
+    bundles = [b.to_dict() for b in log.bundles]
+    bundles[0]["signature"] = None
+
+    ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles, public_key_hex=pub)
+    assert ok is False
+    assert bad_index == 0
+
+
+def test_verify_with_public_key_fails_when_unsigned_bundles_are_checked_against_a_key():
+    log = EvidenceLog()  # no signer at all
+    log.record(_violation(1))
+    bundles = [b.to_dict() for b in log.bundles]
+
+    pytest.importorskip("cryptography")
+    from acel.evidence import ed25519_signer
+
+    _sign, unrelated_pub = ed25519_signer()
+    ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles, public_key_hex=unrelated_pub)
+    assert ok is False
+    assert bad_index == 0
+
+
+def test_verify_with_wrong_public_key_fails():
+    pytest.importorskip("cryptography")
+    from acel.evidence import ed25519_signer
+
+    sign, _pub = ed25519_signer()
+    _other_sign, other_pub = ed25519_signer()  # unrelated keypair
+
+    log = EvidenceLog(signer=sign)
+    log.record(_violation(1))
+    bundles = [b.to_dict() for b in log.bundles]
+
+    ok, bad_index = EvidenceLog.verify_bundles_detailed(bundles, public_key_hex=other_pub)
+    assert ok is False
+    assert bad_index == 0
+
+
+# ---------------------------------------------------------------------------
+# Keyed (HMAC) redaction markers (security fix: unsalted hash was
+# dictionary-attackable for low-entropy values)
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_log_generates_a_random_redact_key_when_redact_fields_set():
+    log = EvidenceLog(redact_fields={"password"})
+    assert log._redact_key is not None
+    assert len(log._redact_key) == 32
+
+
+def test_evidence_log_uses_hmac_marker_not_plain_sha256():
+    from acel.evidence import _redact_marker
+
+    log = EvidenceLog(redact_fields={"password"})
+    bundle = log.record(_violation_with_args(1, args={"password": "1234"}))
+    marker = bundle.violation["args"]["password"]
+    assert marker.startswith("***REDACTED(hmac-sha256:")
+
+    # An offline attacker who only has the evidence log (no key) cannot
+    # reproduce the marker just by guessing the plaintext, unlike the old
+    # unsalted-sha256 scheme.
+    guessed_unkeyed = _redact_marker("1234")
+    assert guessed_unkeyed != marker
+
+
+def test_two_evidence_logs_produce_different_markers_for_the_same_low_entropy_secret():
+    """Different random keys per EvidenceLog instance -> markers for the
+    exact same guessable value differ across logs, closing off a
+    precomputed-dictionary attack that reuses one rainbow table across logs."""
+    log_a = EvidenceLog(redact_fields={"pin"})
+    log_b = EvidenceLog(redact_fields={"pin"})
+    bundle_a = log_a.record(_violation_with_args(1, args={"pin": "0000"}))
+    bundle_b = log_b.record(_violation_with_args(1, args={"pin": "0000"}))
+    assert bundle_a.violation["args"]["pin"] != bundle_b.violation["args"]["pin"]
+
+
+def test_redact_violation_direct_call_without_key_still_works_unkeyed():
+    """Backward compatible: calling redact_violation() directly (not through
+    EvidenceLog) without a key still produces the old-style plain marker."""
+    v = _violation_with_args(1, args={"token": "same-secret"}).to_dict()
+    redacted = redact_violation(v, {"token"})
+    assert redacted["args"]["token"].startswith("***REDACTED(sha256:")
+
+
+def test_redact_violation_with_explicit_key_produces_hmac_marker():
+    v = _violation_with_args(1, args={"token": "x"}).to_dict()
+    redacted = redact_violation(v, {"token"}, key=b"\x01" * 32)
+    assert redacted["args"]["token"].startswith("***REDACTED(hmac-sha256:")

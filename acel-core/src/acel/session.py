@@ -326,6 +326,23 @@ class Session:
         finalize afterward with :meth:`postcheck` once a result exists. In
         shadow mode, a violation is still recorded but ``gate.blocking`` is
         False, so the caller should forward the call regardless.
+
+        **Security note — preconditions are not safe for concurrency limits.**
+        A precondition only *reads* ``self.state``; state isn't updated until
+        :meth:`postcheck` calls ``spec.commit`` afterward, which happens once
+        the (possibly slow) real tool has finished running. If a client has
+        two calls to the *same tool* in flight on the same connection — which
+        MCP explicitly allows and this session supports — both can call
+        ``precheck`` and read the same pre-commit state before either one's
+        ``postcheck`` commits, so a precondition like
+        ``lambda s: s["balance"] >= amount`` can pass twice against a balance
+        that should only cover one of the two calls (a TOCTOU race). Temporal
+        contracts (``at_most_total``, ``rate_limit``, ``at_most_n_times``) do
+        **not** have this problem — their counters are mutated synchronously,
+        under the lock, inside this same ``precheck`` call — so **any
+        spend/quantity/rate cap should be expressed as a temporal contract,
+        not as a state-read precondition**, if it needs to hold under
+        concurrent/pipelined calls.
         """
         args = dict(args or {})
         with self._lock:

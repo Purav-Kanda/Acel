@@ -118,3 +118,101 @@ def test_verify_subcommand_registered():
     args = parser.parse_args(["verify", "some_file.json"])
     assert args.command == "verify"
     assert args.evidence_file == "some_file.json"
+    assert args.public_key is None
+
+
+# ---------------------------------------------------------------------------
+# --public-key (security fix: signature verification, not just hash chain)
+# ---------------------------------------------------------------------------
+
+
+def _save_signed_evidence(tmp_path):
+    """Build a signed evidence log via the Python API (there's no CLI flag
+    to sign during `acel replay`) and write it where the CLI can read it."""
+    import pytest
+
+    pytest.importorskip("cryptography")
+    from acel import Session, must_precede
+    from acel.evidence import ed25519_signer
+
+    sign, pub = ed25519_signer()
+    session = Session(halt_on_violation=False, signer=sign)
+    session.add_contract(must_precede("validate", "delete"))
+    session.call("delete", {"id": "1"})  # violation, gets recorded+signed
+
+    evidence_path = tmp_path / "signed_evidence.json"
+    evidence_path.write_text(session.evidence.to_json())
+    return evidence_path, pub
+
+
+def test_verify_without_public_key_warns_but_still_passes(tmp_path, capsys):
+    evidence_path, _pub = _save_signed_evidence(tmp_path)
+
+    parser = build_parser()
+    args = parser.parse_args(["verify", str(evidence_path)])
+    exit_code = args.func(args)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "OK" in captured.out
+    assert "no --public-key given" in captured.err or "warning" in captured.err.lower()
+
+
+def test_verify_with_correct_public_key_passes_and_says_signatures_checked(tmp_path, capsys):
+    evidence_path, pub = _save_signed_evidence(tmp_path)
+
+    parser = build_parser()
+    args = parser.parse_args(["verify", str(evidence_path), "--public-key", pub])
+    exit_code = args.func(args)
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "every signature checks out" in out
+
+
+def test_verify_with_wrong_public_key_fails(tmp_path, capsys):
+    import pytest
+
+    pytest.importorskip("cryptography")
+    from acel.evidence import ed25519_signer
+
+    evidence_path, _pub = _save_signed_evidence(tmp_path)
+    _sign, unrelated_pub = ed25519_signer()
+
+    parser = build_parser()
+    args = parser.parse_args(["verify", str(evidence_path), "--public-key", unrelated_pub])
+    exit_code = args.func(args)
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "FAIL" in err
+
+
+def test_verify_public_key_flag_catches_forged_bundle_that_hash_only_check_misses(tmp_path, capsys):
+    """The core regression test for the vulnerability: a forged bundle with
+    hashes recomputed to match passes hash-only verify, but fails once a
+    public key is supplied."""
+    evidence_path, pub = _save_signed_evidence(tmp_path)
+
+    from acel.evidence import _canonical, _payload_of, _sha256_hex
+
+    bundles = json.loads(evidence_path.read_text())
+    bundles[0]["violation"]["tool"] = "something_else"
+    payload = _payload_of(bundles[0]["index"], bundles[0]["timestamp"], bundles[0]["violation"])
+    bundles[0]["trace_hash"] = _sha256_hex(_canonical(payload))
+    bundles[0]["bundle_hash"] = _sha256_hex((bundles[0]["prev_hash"] + bundles[0]["trace_hash"]).encode())
+    evidence_path.write_text(json.dumps(bundles))
+
+    parser = build_parser()
+
+    hash_only_args = parser.parse_args(["verify", str(evidence_path)])
+    assert hash_only_args.func(hash_only_args) == 0  # fooled, as documented
+
+    capsys.readouterr()
+
+    signed_args = parser.parse_args(["verify", str(evidence_path), "--public-key", pub])
+    exit_code = signed_args.func(signed_args)
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "FAIL" in err
