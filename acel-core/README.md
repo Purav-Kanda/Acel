@@ -20,10 +20,42 @@ average?" ACEL answers the production question they can't: "did *this* execution
 just violate a rule we cannot allow to be violated?" — before the bad tool call
 lands.
 
+**New here? Read Install → Quickstart → The eight temporal templates and
+you'll have a working contract in a few minutes.** Everything past that is
+reference material for specific needs (MCP, multi-tenant servers, config
+files, evidence/signing, metrics) — jump to whichever section matches what
+you're trying to do:
+
+- [Install](#install) · [Quickstart](#quickstart) · [The eight temporal
+  templates](#the-eight-temporal-templates) · [Pre/postconditions](#prepostconditions-with-decorators)
+- [Using ACEL outside MCP](#using-acel-outside-mcp-langchain-openai-function-calling-or-anything-else)
+  (LangChain / OpenAI function calling / any Python callable)
+- [Live MCP proxy](#live-mcp-proxy-phase-2) · [Multiple simultaneous
+  clients](#multiple-simultaneous-clients) (multi-tenant servers)
+- [Shadow mode](#shadow-mode) (safe rollout) · [Config-driven
+  contracts](#config-driven-contracts-no-code-required) (no-code rules files)
+- [Verifying evidence for tampering](#verifying-evidence-for-tampering) ·
+  [Security notes](#security-notes) (read this before production use)
+- [Metrics](#metrics) · [Concurrency](#concurrency) · [Correctness](#correctness)
+  / [Performance](#performance) (the numbers behind the claims)
+
 ## Install
 
 ```bash
-pip install -e .
+pip install acel-core
+```
+
+Requires Python 3.10+. No required dependencies for the core monitor — `mcp`,
+`pyyaml` (config files), `cryptography` (Ed25519 signing), and
+`langchain-core` are optional, installed as needed (see the sections that use
+them below, or grab everything with `pip install "acel-core[mcp,config,sign,langchain]"`).
+
+Working from a clone of this repo instead (e.g. to run the tests or examples)?
+
+```bash
+git clone https://github.com/Purav-Kanda/Acel
+cd Acel/acel-core
+pip install -e ".[dev,mcp,config,sign,langchain]"
 ```
 
 ## Quickstart
@@ -559,7 +591,7 @@ fully isolated `Session` in the first place.
 python benchmarks/correctness.py
 ```
 
-A labeled dataset of 59 synthetic tool-call traces spanning all 7 temporal
+A labeled dataset of 67 synthetic tool-call traces spanning all 8 temporal
 templates (valid sequences, violating sequences, and edge cases like empty
 traces and multiple simultaneous contracts) — measured at **100% precision
 and 100% recall**. Since the monitor is deterministic automaton checking, not
