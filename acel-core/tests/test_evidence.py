@@ -256,6 +256,14 @@ def test_ed25519_signer_with_path_persists_and_reuses_key(tmp_path):
 def test_ed25519_signer_key_file_is_owner_only(tmp_path):
     pytest.importorskip("cryptography")
     import stat
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip(
+            "Windows doesn't use POSIX permission bits — chmod(0o600) can't be "
+            "verified this way there; the OS-level protection comes from NTFS "
+            "ACLs instead, which this test doesn't check."
+        )
 
     from acel.evidence import ed25519_signer
 
