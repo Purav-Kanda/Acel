@@ -420,55 +420,85 @@ class Session:
 
         Non-halting: unlike :meth:`call`, this never raises and never executes
         tools. Used for CI-style checking of recorded traces and for the
-        correctness test suite. ``halt_on_violation`` is ignored here.
+        correctness test suite. ``halt_on_violation`` is ignored here. Also
+        finalizes co-safety contracts (``required_before_session_end``) at
+        the end, since a replayed trace is treated as a *complete* session —
+        for reconstructing state from a *partial* history (more calls are
+        still coming), use :meth:`replay_prefix` instead, which skips that.
         """
         with self._lock:
-            found: list[Violation] = []
-            for record in events:
-                event = record if isinstance(record, ToolCallEvent) else ToolCallEvent.from_record(record)
-                self._step += 1
-                step = self._step
-                spec = self._tools.get(event.tool)
-                args = dict(event.args)
-
-                # 1. Precondition gate (short-circuits the step, matching live).
-                pre_failed = False
-                if spec is not None:
-                    for check in spec.preconditions:
-                        if not check.evaluate(self.state):
-                            found.append(self._record("precondition", check.description, event.tool, step, args, None))
-                            pre_failed = True
-                            break
-                if pre_failed:
-                    continue
-
-                # 2. Temporal gate — record each contract's first transition to VIOLATED.
-                temporal_failed = False
-                for contract in self._contracts:
-                    already = contract.verdict is Verdict.VIOLATED
-                    if contract.on_event(event.tool, args) is Verdict.VIOLATED and not already:
-                        found.append(self._record("temporal", contract.spec, event.tool, step, args, None))
-                        temporal_failed = True
-                if temporal_failed:
-                    continue
-
-                # 3. Postcondition gate + commit.
-                if spec is not None:
-                    post_failed = False
-                    for check in spec.postconditions:
-                        if not check.evaluate(self.state, event.result):
-                            found.append(self._record("postcondition", check.description, event.tool, step, args, event.result))
-                            post_failed = True
-                            break
-                    if post_failed:
-                        continue
-                    if spec.commit is not None:
-                        spec.commit(self.state, args, event.result)
-
-                self._trace.append({"step": step, "tool": event.tool, "args": args, "result": event.result})
-
+            found = self._replay_events(events)
             found.extend(self.end_session())
             return found
+
+    def replay_prefix(self, events: Iterable[ToolCallEvent | dict[str, Any]]) -> list[Violation]:
+        """Like :meth:`replay`, but for a trace that is a *prefix* of an
+        ongoing session, not a complete one.
+
+        Advances state and contract automata exactly as :meth:`replay` does,
+        but does **not** call :meth:`end_session` — since more calls are
+        still expected, checking ``required_before_session_end`` here would
+        be a false alarm (the session hasn't ended, you just don't have the
+        rest of its history yet). Intended for integrations that can't keep
+        a live in-process ``Session`` across calls (e.g. a hook script
+        spawned fresh per tool call) and instead reconstruct current state
+        by replaying everything recorded so far, then calling
+        :meth:`precheck`/:meth:`postcheck` for the new call. See
+        ``acel.hooks`` for a concrete example.
+        """
+        with self._lock:
+            return self._replay_events(events)
+
+    def _replay_events(self, events: Iterable[ToolCallEvent | dict[str, Any]]) -> list[Violation]:
+        """Shared advancement loop for :meth:`replay` and :meth:`replay_prefix`.
+
+        Caller holds ``self._lock``.
+        """
+        found: list[Violation] = []
+        for record in events:
+            event = record if isinstance(record, ToolCallEvent) else ToolCallEvent.from_record(record)
+            self._step += 1
+            step = self._step
+            spec = self._tools.get(event.tool)
+            args = dict(event.args)
+
+            # 1. Precondition gate (short-circuits the step, matching live).
+            pre_failed = False
+            if spec is not None:
+                for check in spec.preconditions:
+                    if not check.evaluate(self.state):
+                        found.append(self._record("precondition", check.description, event.tool, step, args, None))
+                        pre_failed = True
+                        break
+            if pre_failed:
+                continue
+
+            # 2. Temporal gate — record each contract's first transition to VIOLATED.
+            temporal_failed = False
+            for contract in self._contracts:
+                already = contract.verdict is Verdict.VIOLATED
+                if contract.on_event(event.tool, args) is Verdict.VIOLATED and not already:
+                    found.append(self._record("temporal", contract.spec, event.tool, step, args, None))
+                    temporal_failed = True
+            if temporal_failed:
+                continue
+
+            # 3. Postcondition gate + commit.
+            if spec is not None:
+                post_failed = False
+                for check in spec.postconditions:
+                    if not check.evaluate(self.state, event.result):
+                        found.append(self._record("postcondition", check.description, event.tool, step, args, event.result))
+                        post_failed = True
+                        break
+                if post_failed:
+                    continue
+                if spec.commit is not None:
+                    spec.commit(self.state, args, event.result)
+
+            self._trace.append({"step": step, "tool": event.tool, "args": args, "result": event.result})
+
+        return found
 
     # --- internals ------------------------------------------------------
     def _record(

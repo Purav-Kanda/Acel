@@ -30,6 +30,8 @@ you're trying to do:
   templates](#the-eight-temporal-templates) · [Pre/postconditions](#prepostconditions-with-decorators)
 - [Using ACEL outside MCP](#using-acel-outside-mcp-langchain-openai-function-calling-or-anything-else)
   (LangChain / OpenAI function calling / any Python callable)
+- [Guarding Claude Code itself](#guarding-claude-code-itself) (block Bash/Edit/Write via hooks) ·
+  [Content-aware matching](#content-aware-matching-matching-on-what-a-call-actually-does) (match on call content, not just tool name)
 - [Live MCP proxy](#live-mcp-proxy-phase-2) · [Multiple simultaneous
   clients](#multiple-simultaneous-clients) (multi-tenant servers)
 - [Shadow mode](#shadow-mode) (safe rollout) · [Config-driven
@@ -129,6 +131,11 @@ timestamps of recent matching calls instead of a running session total, so
 it caps *bursts* (calls per minute) rather than a per-session budget — the
 two compose if you want both.
 
+`a`/`b`/`tool` in every row above can also be a *content-aware* matcher
+instead of a plain name — see [Content-aware matching](#content-aware-matching-matching-on-what-a-call-actually-does)
+for how to key a rule off what a call's arguments actually contain, not
+just which tool it called.
+
 ```python
 from acel import Session, at_most_total, rate_limit
 
@@ -199,6 +206,152 @@ Full runnable demos: `examples/langchain_agent_example.py` (requires
 `examples/openai_function_calling_example.py` (no extra dependency, no API
 key needed to run it — uses hand-built `tool_calls` dicts shaped like the
 real API's response).
+
+## Guarding Claude Code itself
+
+Everything above wires ACEL into an agent *you* build. This section is
+different: it plugs ACEL into **Claude Code's own built-in tools** (`Bash`,
+`Edit`, `Write`, ...) via Claude Code's `PreToolUse`/`PostToolUse` hooks, so
+it can block a real coding-agent tool call before it runs — using the exact
+same temporal contracts as everywhere else.
+
+Each hook fires as a fresh subprocess per tool call, so there's no
+long-lived process to hold a live `Session` in memory. `acel hook-pretooluse`
+handles this by reconstructing state on every invocation: it replays a
+small trace file it maintains itself (one per Claude Code session) through
+a fresh `Session`, then checks the new call against that reconstructed
+state. `acel hook-posttooluse` appends each completed call to that trace
+file so the next invocation sees it.
+
+1. Write a rules file describing what to guard, e.g. `.claude/acel_rules.yaml`:
+
+   ```yaml
+   contracts:
+     - template: rate_limit
+       args: [Bash]
+       kwargs: {n: 10, window_seconds: 60}
+
+     - template: must_precede
+       args:
+         - {tool: Bash, matches: "pytest|npm (run )?test"}
+         - {tool: Bash, matches: "git commit"}
+   ```
+
+   The first rule catches a runaway retry loop (more than 10 `Bash` calls in
+   any 60-second window). The second is the more interesting one: `Bash` and
+   `Bash` are the same tool name, so a plain tool-name rule can't tell a
+   commit apart from a test run — the `{tool: ..., matches: ...}` form
+   matches on the call's *content* instead (here, the `command` argument
+   against a regex), so this actually blocks a `git commit` that wasn't
+   preceded by a test run. See [Content-aware matching](#content-aware-matching-matching-on-what-a-call-actually-does)
+   for the full explanation, and the [eight temporal templates](#the-eight-temporal-templates)
+   for what else you can express this way.
+
+2. Add the hooks to `.claude/settings.json` in your project (find your
+   Python path with `(Get-Command python).Source` on Windows or `which
+   python3` on macOS/Linux — using it directly, rather than relying on
+   `acel` being on `PATH` in whatever environment Claude Code spawns hooks
+   in, avoids the most common setup failure):
+
+   ```json
+   {
+     "hooks": {
+       "PreToolUse": [
+         {
+           "matcher": "*",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "/path/to/python",
+               "args": ["-m", "acel.cli", "hook-pretooluse", "--rules", "${CLAUDE_PROJECT_DIR}/.claude/acel_rules.yaml"]
+             }
+           ]
+         }
+       ],
+       "PostToolUse": [
+         {
+           "matcher": "*",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "/path/to/python",
+               "args": ["-m", "acel.cli", "hook-posttooluse"]
+             }
+           ]
+         }
+       ]
+     }
+   }
+   ```
+
+3. Restart Claude Code. A blocked call surfaces to the model as a denied
+   tool call with ACEL's reason attached, the same way any other permission
+   denial does.
+
+**Scope, honestly:** content-aware matching (below) covers a lot, but it's
+still regex-on-one-field, not arbitrary logic — "block any `Bash` command
+containing `rm -rf`, unless it's inside `/tmp`" needs real conditional logic
+over the arguments, which is a precondition's job, and preconditions still
+only see session state, not the current call's args. That gap (argument-aware
+*preconditions*, as opposed to argument-aware temporal contracts, which
+this section already covers) remains a real, plausible future extension.
+
+See `acel.hooks` for the implementation and `acel hook-pretooluse --help` /
+`acel hook-posttooluse --help` for the CLI reference.
+
+## Content-aware matching: matching on what a call actually does
+
+Every temporal template — `must_precede(a, b)`, `at_most_n_times(a, n)`,
+all [eight](#the-eight-temporal-templates) — takes `a`/`b`/`tool` as either
+a plain tool-name string (exact match, the original behavior) or a
+**content-aware matcher**: something that also looks at the call's
+*arguments*, not just its name. This is what makes the "commit before test"
+rule above possible — `git commit` and `pytest` are both just `Bash` calls,
+indistinguishable by name alone.
+
+In Python, build one with `matching()`:
+
+```python
+from acel import Session, matching, must_precede
+
+test_run = matching("Bash", r"pytest|npm (run )?test")
+commit = matching("Bash", r"git commit")
+
+session = Session()
+session.add_contract(must_precede(test_run, commit))
+```
+
+`matching(tool, pattern, field="command")` matches a call to `tool` whose
+`args[field]` (stringified) contains a case-insensitive regex match for
+`pattern`. `field` defaults to `"command"` — the argument Claude Code's
+`Bash`/`PowerShell` tools use — but works for any tool/field, e.g.
+`matching("Write", r"\.env$", field="file_path")` to catch a write to a
+`.env` file specifically, as opposed to any write.
+
+In a JSON/YAML rules file, the same thing is a small dict wherever a plain
+tool name would otherwise go:
+
+```yaml
+contracts:
+  - template: must_precede
+    args:
+      - {tool: Bash, matches: "pytest|npm (run )?test"}
+      - {tool: Bash, matches: "git commit"}
+```
+
+**Still safe, still no code execution.** A `{tool, matches, field}` dict is
+just data — three strings — parsed with `yaml.safe_load`/`json.loads` same
+as everything else in a rules file; there's no `eval` involved, and the
+regex only ever runs against one argument value, never against your rules
+file or anything else. This is a meaningfully different (and safe) thing
+from a full precondition, which is why it's allowed in config files while
+preconditions still aren't — see [Config-driven contracts](#config-driven-contracts-no-code-required)
+for that reasoning in full.
+
+If you need something a plain regex genuinely can't express — real
+conditional logic, multiple fields combined, anything stateful — build a
+`ContentMatch` directly with your own predicate function in Python instead
+of `matching()`; that part, like preconditions, can't come from a data file.
 
 ## Live MCP proxy (Phase 2)
 

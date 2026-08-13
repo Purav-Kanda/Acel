@@ -18,6 +18,11 @@ Semantics summary (``a``, ``b`` are tool names):
 - ``mutually_exclusive(a, b)``      ``a`` and ``b`` must not both occur in one session.
 - ``rate_limit(a, n, window_seconds)`` ``a`` occurs at most ``n`` times in any
                                      rolling ``window_seconds``-second window.
+
+Every ``a``/``b``/``tool`` above accepts either a plain tool-name string
+(exact match, the original behavior) or a content-aware matcher — see
+:mod:`acel.matchers` — so a rule can key off *which* ``Bash`` call happened
+(e.g. "a call matching `git commit`"), not just that some ``Bash`` call did.
 """
 
 from __future__ import annotations
@@ -25,9 +30,22 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Callable
+from typing import Any, Callable, Union
 
 from .verdict import Verdict
+
+# A tool identifier accepted anywhere a template currently takes a plain
+# tool-name string: either that plain name (exact match, the original
+# behavior), or a callable ``(tool, args) -> bool`` for content-aware
+# matching — see acel.matchers.ContentMatch/matching() for the friendly
+# way to build one instead of writing the callable by hand.
+ToolMatcher = Union[str, Callable[[str, dict], bool]]
+
+
+def _match(matcher: ToolMatcher, tool: str, args: dict[str, Any]) -> bool:
+    if isinstance(matcher, str):
+        return tool == matcher
+    return bool(matcher(tool, args))
 
 
 class TemporalContract(ABC):
@@ -90,17 +108,17 @@ class TemporalContract(ABC):
 class MustPrecede(TemporalContract):
     """Every occurrence of ``later`` must be preceded by at least one ``earlier``."""
 
-    def __init__(self, earlier: str, later: str) -> None:
+    def __init__(self, earlier: ToolMatcher, later: ToolMatcher) -> None:
         super().__init__(f"must_precede({earlier}, {later})")
         self.earlier = earlier
         self.later = later
         self._seen_earlier = False
 
     def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
-        if tool == self.earlier:
+        if _match(self.earlier, tool, args):
             self._seen_earlier = True
             return Verdict.SATISFIED
-        if tool == self.later and not self._seen_earlier:
+        if _match(self.later, tool, args) and not self._seen_earlier:
             return Verdict.VIOLATED
         return Verdict.SATISFIED if self._seen_earlier else Verdict.UNKNOWN
 
@@ -114,7 +132,7 @@ class MustPrecede(TemporalContract):
 class AtMostNTimes(TemporalContract):
     """``tool`` may be called at most ``n`` times per session."""
 
-    def __init__(self, tool: str, n: int) -> None:
+    def __init__(self, tool: ToolMatcher, n: int) -> None:
         if n < 0:
             raise ValueError("n must be non-negative")
         super().__init__(f"at_most_n_times({tool}, n={n})")
@@ -123,7 +141,7 @@ class AtMostNTimes(TemporalContract):
         self._count = 0
 
     def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
-        if tool == self.tool:
+        if _match(self.tool, tool, args):
             self._count += 1
             if self._count > self.n:
                 return Verdict.VIOLATED
@@ -136,16 +154,16 @@ class AtMostNTimes(TemporalContract):
 class NeverAfter(TemporalContract):
     """``a`` must never occur after ``b`` has occurred."""
 
-    def __init__(self, a: str, b: str) -> None:
+    def __init__(self, a: ToolMatcher, b: ToolMatcher) -> None:
         super().__init__(f"never_after({a}, {b})")
         self.a = a
         self.b = b
         self._seen_b = False
 
     def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
-        if tool == self.b:
+        if _match(self.b, tool, args):
             self._seen_b = True
-        if tool == self.a and self._seen_b:
+        if _match(self.a, tool, args) and self._seen_b:
             return Verdict.VIOLATED
         return Verdict.UNKNOWN
 
@@ -156,13 +174,13 @@ class NeverAfter(TemporalContract):
 class RequiredBeforeSessionEnd(TemporalContract):
     """``tool`` must be called at least once before the session ends."""
 
-    def __init__(self, tool: str) -> None:
+    def __init__(self, tool: ToolMatcher) -> None:
         super().__init__(f"required_before_session_end({tool})")
         self.tool = tool
         self._seen = False
 
     def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
-        if tool == self.tool:
+        if _match(self.tool, tool, args):
             self._seen = True
             return Verdict.SATISFIED
         return Verdict.SATISFIED if self._seen else Verdict.UNKNOWN
@@ -182,16 +200,16 @@ class CannotFollowWithout(TemporalContract):
     dependent action ("delete cannot happen without a prior backup").
     """
 
-    def __init__(self, action: str, prerequisite: str) -> None:
+    def __init__(self, action: ToolMatcher, prerequisite: ToolMatcher) -> None:
         super().__init__(f"cannot_follow_without({action}, {prerequisite})")
         self.action = action
         self.prerequisite = prerequisite
         self._seen_prereq = False
 
     def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
-        if tool == self.prerequisite:
+        if _match(self.prerequisite, tool, args):
             self._seen_prereq = True
-        if tool == self.action and not self._seen_prereq:
+        if _match(self.action, tool, args) and not self._seen_prereq:
             return Verdict.VIOLATED
         return Verdict.SATISFIED if self._seen_prereq else Verdict.UNKNOWN
 
@@ -205,7 +223,7 @@ class CannotFollowWithout(TemporalContract):
 class MutuallyExclusive(TemporalContract):
     """``a`` and ``b`` must not both occur within a single session."""
 
-    def __init__(self, a: str, b: str) -> None:
+    def __init__(self, a: ToolMatcher, b: ToolMatcher) -> None:
         super().__init__(f"mutually_exclusive({a}, {b})")
         self.a = a
         self.b = b
@@ -213,9 +231,9 @@ class MutuallyExclusive(TemporalContract):
         self._seen_b = False
 
     def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
-        if tool == self.a:
+        if _match(self.a, tool, args):
             self._seen_a = True
-        elif tool == self.b:
+        elif _match(self.b, tool, args):
             self._seen_b = True
         if self._seen_a and self._seen_b:
             return Verdict.VIOLATED
@@ -243,7 +261,7 @@ class CumulativeLimit(TemporalContract):
     genuinely dangerous failure mode.
     """
 
-    def __init__(self, tool: str, field: str, limit: float) -> None:
+    def __init__(self, tool: ToolMatcher, field: str, limit: float) -> None:
         if limit < 0:
             raise ValueError("limit must be non-negative")
         super().__init__(f"at_most_total({tool}, {field}, limit={limit})")
@@ -253,7 +271,7 @@ class CumulativeLimit(TemporalContract):
         self._total: float = 0.0
 
     def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
-        if tool != self.tool:
+        if not _match(self.tool, tool, args):
             return Verdict.UNKNOWN if self._total == 0 else Verdict.SATISFIED
 
         value = args.get(self.field)
@@ -297,7 +315,7 @@ class RateLimit(TemporalContract):
 
     def __init__(
         self,
-        tool: str,
+        tool: ToolMatcher,
         n: int,
         window_seconds: float,
         *,
@@ -315,7 +333,7 @@ class RateLimit(TemporalContract):
         self._timestamps: deque[float] = deque()
 
     def _step(self, tool: str, args: dict[str, Any]) -> Verdict:
-        if tool != self.tool:
+        if not _match(self.tool, tool, args):
             return Verdict.UNKNOWN if not self._timestamps else Verdict.SATISFIED
 
         now = self._clock()
@@ -337,36 +355,36 @@ class RateLimit(TemporalContract):
 
 # --- public factory functions (the named-template DSL) -----------------
 
-def must_precede(earlier: str, later: str) -> MustPrecede:
+def must_precede(earlier: ToolMatcher, later: ToolMatcher) -> MustPrecede:
     return MustPrecede(earlier, later)
 
 
-def at_most_n_times(tool: str, n: int) -> AtMostNTimes:
+def at_most_n_times(tool: ToolMatcher, n: int) -> AtMostNTimes:
     return AtMostNTimes(tool, n)
 
 
-def at_most_total(tool: str, field: str, limit: float) -> CumulativeLimit:
+def at_most_total(tool: ToolMatcher, field: str, limit: float) -> CumulativeLimit:
     return CumulativeLimit(tool, field, limit)
 
 
-def never_after(a: str, b: str) -> NeverAfter:
+def never_after(a: ToolMatcher, b: ToolMatcher) -> NeverAfter:
     return NeverAfter(a, b)
 
 
-def required_before_session_end(tool: str) -> RequiredBeforeSessionEnd:
+def required_before_session_end(tool: ToolMatcher) -> RequiredBeforeSessionEnd:
     return RequiredBeforeSessionEnd(tool)
 
 
-def cannot_follow_without(action: str, prerequisite: str) -> CannotFollowWithout:
+def cannot_follow_without(action: ToolMatcher, prerequisite: ToolMatcher) -> CannotFollowWithout:
     return CannotFollowWithout(action, prerequisite)
 
 
-def mutually_exclusive(a: str, b: str) -> MutuallyExclusive:
+def mutually_exclusive(a: ToolMatcher, b: ToolMatcher) -> MutuallyExclusive:
     return MutuallyExclusive(a, b)
 
 
 def rate_limit(
-    tool: str,
+    tool: ToolMatcher,
     n: int,
     window_seconds: float,
     *,

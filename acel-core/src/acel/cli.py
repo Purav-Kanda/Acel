@@ -25,6 +25,10 @@ Ships five commands:
   pre/postconditions still require Python since they evaluate logic over
   state, not just names and counts (see ``acel/config.py`` for why).
 - ``acel init-config`` — write a starter rules file to edit.
+- ``acel hook-pretooluse`` / ``acel hook-posttooluse`` — Claude Code hook
+  entry points: block a real coding-agent tool call (Bash, Edit, Write,
+  ...) before it runs if it would violate a contract. See ``acel.hooks``
+  and the README's "Guarding Claude Code itself" section.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from types import ModuleType
 from typing import Any
 
 from . import config as config_mod
+from . import hooks as hooks_mod
 from .evidence import EvidenceLog
 from .session import Session
 
@@ -232,6 +237,14 @@ def cmd_show(args: argparse.Namespace) -> int:
         print()
 
     return 0 if ok else 1
+
+
+def cmd_hook_pretooluse(args: argparse.Namespace) -> int:
+    return hooks_mod.main_pretooluse(args.rules, state_dir=args.state_dir)
+
+
+def cmd_hook_posttooluse(args: argparse.Namespace) -> int:
+    return hooks_mod.main_posttooluse(state_dir=args.state_dir)
 
 
 def _load_module(ref: str) -> ModuleType:
@@ -488,6 +501,33 @@ def build_parser() -> argparse.ArgumentParser:
         "state) layered on top of whatever the module's build_server() already sets up.",
     )
     serve.set_defaults(func=cmd_serve)
+
+    hook_pretooluse = sub.add_parser(
+        "hook-pretooluse",
+        help="Claude Code PreToolUse hook: block a tool call before it runs "
+        "if it violates a contract. See README's 'Guarding Claude Code itself'.",
+    )
+    hook_pretooluse.add_argument("--rules", required=True, help="Path to a JSON or YAML rules file.")
+    hook_pretooluse.add_argument(
+        "--state-dir",
+        default=hooks_mod.DEFAULT_STATE_DIR,
+        help="Directory to keep per-session trace files in (default: .claude/acel_state). "
+        "Must match --state-dir on hook-posttooluse.",
+    )
+    hook_pretooluse.set_defaults(func=cmd_hook_pretooluse)
+
+    hook_posttooluse = sub.add_parser(
+        "hook-posttooluse",
+        help="Claude Code PostToolUse hook: record a completed tool call so the next "
+        "hook-pretooluse invocation sees it. Never blocks.",
+    )
+    hook_posttooluse.add_argument(
+        "--state-dir",
+        default=hooks_mod.DEFAULT_STATE_DIR,
+        help="Directory to keep per-session trace files in (default: .claude/acel_state). "
+        "Must match --state-dir on hook-pretooluse.",
+    )
+    hook_posttooluse.set_defaults(func=cmd_hook_posttooluse)
 
     return parser
 

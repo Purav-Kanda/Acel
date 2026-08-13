@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .matchers import matching
 from .temporal import (
     TemporalContract,
     at_most_n_times,
@@ -33,6 +34,27 @@ TEMPLATES = {
 }
 
 
+def _resolve_arg(value: Any) -> Any:
+    """Turn a declarative content-matcher dict into a real matcher.
+
+    ``{"tool": "Bash", "matches": "pytest", "field": "command"}`` (``field``
+    optional, defaults to ``"command"``) becomes
+    ``matching("Bash", "pytest", field="command")`` — see
+    :mod:`acel.matchers`. Still just data in, a plain object out: no code
+    execution, same safety story as every other config-file value. Any
+    non-dict value (the normal case — a plain tool-name string) passes
+    through unchanged.
+    """
+    if not isinstance(value, dict):
+        return value
+    if "tool" not in value or "matches" not in value:
+        raise ValueError(
+            "a content-matcher arg must have 'tool' and 'matches' keys "
+            f"(optionally 'field'); got keys {sorted(value)}"
+        )
+    return matching(value["tool"], value["matches"], field=value.get("field", "command"))
+
+
 def build_contract(spec: dict[str, Any]) -> TemporalContract:
     """Instantiate a temporal contract from a spec dict."""
     template = spec.get("template")
@@ -40,6 +62,6 @@ def build_contract(spec: dict[str, Any]) -> TemporalContract:
         raise ValueError(
             f"unknown template {template!r}; expected one of {sorted(TEMPLATES)}"
         )
-    args = spec.get("args", [])
+    args = [_resolve_arg(a) for a in spec.get("args", [])]
     kwargs = spec.get("kwargs", {})
     return TEMPLATES[template](*args, **kwargs)

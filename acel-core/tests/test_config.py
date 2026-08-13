@@ -235,3 +235,96 @@ def test_group_specs_not_a_list_raises_config_error(tmp_path):
     path.write_text('{"groups": {"g": "nope"}}')
     with pytest.raises(config_mod.ConfigError, match=r"groups\['g'\] must be a list"):
         config_mod.contracts_from_rules(config_mod.load_rules(path))
+
+
+# ---------------------------------------------------------------------------
+# Declarative content-aware matchers ({"tool": ..., "matches": ...} in args)
+# ---------------------------------------------------------------------------
+
+CONTENT_MATCHER_YAML = """\
+contracts:
+  - template: must_precede
+    args:
+      - {tool: Bash, matches: "pytest|npm (run )?test"}
+      - {tool: Bash, matches: "git commit"}
+"""
+
+
+def test_content_matcher_dict_in_args_builds_a_working_contract(tmp_path):
+    pytest.importorskip("yaml")
+    path = tmp_path / "rules.yaml"
+    path.write_text(CONTENT_MATCHER_YAML)
+    contracts = config_mod.contracts_from_rules(config_mod.load_rules(path))
+    assert len(contracts) == 1
+
+    contract = contracts[0]
+    # A commit with no prior test run violates.
+    from acel.verdict import Verdict
+
+    assert contract.on_event("Bash", {"command": "git commit -m 'wip'"}) is Verdict.VIOLATED
+
+
+def test_content_matcher_dict_allows_when_test_ran_first(tmp_path):
+    pytest.importorskip("yaml")
+    path = tmp_path / "rules.yaml"
+    path.write_text(CONTENT_MATCHER_YAML)
+    contracts = config_mod.contracts_from_rules(config_mod.load_rules(path))
+    contract = contracts[0]
+
+    from acel.verdict import Verdict
+
+    assert contract.on_event("Bash", {"command": "pytest -q"}) is not Verdict.VIOLATED
+    assert contract.on_event("Bash", {"command": "git commit -m 'wip'"}) is not Verdict.VIOLATED
+
+
+def test_content_matcher_dict_defaults_field_to_command(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text('{"contracts": [{"template": "at_most_n_times", "args": [{"tool": "Bash", "matches": "rm"}], "kwargs": {"n": 0}}]}')
+    contracts = config_mod.contracts_from_rules(config_mod.load_rules(path))
+    contract = contracts[0]
+
+    from acel.verdict import Verdict
+
+    assert contract.on_event("Bash", {"command": "rm file.txt"}) is Verdict.VIOLATED
+
+
+def test_content_matcher_dict_custom_field(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text(
+        '{"contracts": [{"template": "at_most_n_times", '
+        '"args": [{"tool": "Write", "matches": "\\\\.env$", "field": "file_path"}], '
+        '"kwargs": {"n": 0}}]}'
+    )
+    contracts = config_mod.contracts_from_rules(config_mod.load_rules(path))
+    contract = contracts[0]
+
+    from acel.verdict import Verdict
+
+    # A non-matching write never trips it (checked first — the contract
+    # latches VIOLATED permanently once tripped, so order matters here).
+    assert contract.on_event("Write", {"file_path": "config/other.py"}) is not Verdict.VIOLATED
+    assert contract.on_event("Write", {"file_path": "config/.env"}) is Verdict.VIOLATED
+
+
+def test_content_matcher_dict_missing_matches_key_raises_config_error(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text('{"contracts": [{"template": "at_most_n_times", "args": [{"tool": "Bash"}], "kwargs": {"n": 1}}]}')
+    with pytest.raises(config_mod.ConfigError, match="tool.*matches"):
+        config_mod.contracts_from_rules(config_mod.load_rules(path))
+
+
+def test_content_matcher_dict_missing_tool_key_raises_config_error(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text('{"contracts": [{"template": "at_most_n_times", "args": [{"matches": "rm"}], "kwargs": {"n": 1}}]}')
+    with pytest.raises(config_mod.ConfigError):
+        config_mod.contracts_from_rules(config_mod.load_rules(path))
+
+
+def test_plain_string_args_still_work_alongside_content_matchers(tmp_path):
+    """Regression guard: adding matcher-dict support shouldn't break the
+    existing plain-string args path."""
+    path = tmp_path / "rules.json"
+    path.write_text('{"contracts": [{"template": "must_precede", "args": ["validate", "delete"]}]}')
+    contracts = config_mod.contracts_from_rules(config_mod.load_rules(path))
+    assert len(contracts) == 1
+    assert "must_precede(validate, delete)" in contracts[0].spec

@@ -13,6 +13,7 @@ from __future__ import annotations
 from .conditions import Check, postcondition, precondition
 from .events import ToolCallEvent
 from .evidence import EvidenceBundle, EvidenceLog, ed25519_signer, redact_violation
+from .matchers import ContentMatch, matching
 from .metrics import Metrics, serve_metrics_http
 from .session import Gate, Session, ToolSpec
 from .state import StateStore
@@ -30,7 +31,7 @@ from .temporal import (
 from .verdict import Verdict
 from .violations import ContractViolation, Violation
 
-__version__ = "0.1.10"
+__version__ = "0.1.12"
 
 __all__ = [
     "__version__",
@@ -64,4 +65,7 @@ __all__ = [
     "cannot_follow_without",
     "mutually_exclusive",
     "rate_limit",
+    # content-aware matching
+    "ContentMatch",
+    "matching",
 ]

@@ -76,6 +76,49 @@ def test_replay_does_not_double_report_latched_contract():
     assert len(must_precede_hits) == 1
 
 
+def test_replay_prefix_does_not_trigger_end_session_checks():
+    """The whole point of replay_prefix over replay: a required_before_session_end
+    contract shouldn't fire just because the trace-so-far hasn't included it
+    yet — more calls are still expected."""
+    session = Session(halt_on_violation=False)
+    session.add_contract(required_before_session_end("commit"))
+    violations = session.replay_prefix([{"tool": "work"}])
+    assert violations == []
+
+
+def test_replay_prefix_still_advances_temporal_state():
+    session = Session(halt_on_violation=False)
+    session.add_contract(must_precede("validate", "delete"))
+    violations = session.replay_prefix([{"tool": "delete"}])
+    assert any("must_precede" in v.spec for v in violations)
+
+
+def test_replay_prefix_then_precheck_sees_reconstructed_state():
+    """The actual use case: replay prior history, then precheck the *next*
+    call and see it correctly gated by everything that came before."""
+    session = Session(halt_on_violation=False)
+    session.add_contract(at_most_n_times("delete", n=1))
+    session.replay_prefix([{"tool": "delete"}])  # first delete, contract now at its cap
+
+    gate = session.precheck("delete", {})  # second delete should be blocked
+    assert gate.violation is not None
+    assert gate.blocking is True
+
+
+def test_replay_prefix_matches_replay_state_for_same_events():
+    """replay_prefix should leave the contract automata in the same place
+    replay() would, minus the end-of-session check."""
+    a = Session(halt_on_violation=False)
+    a.add_contract(at_most_n_times("delete", n=5))
+    a.replay_prefix([{"tool": "delete"}, {"tool": "delete"}])
+
+    b = Session(halt_on_violation=False)
+    b.add_contract(at_most_n_times("delete", n=5))
+    b.replay([{"tool": "delete"}, {"tool": "delete"}])
+
+    assert a.state.snapshot() == b.state.snapshot()
+
+
 def test_throwing_predicate_fails_closed():
     """A precondition that raises is treated as a failed check (sound)."""
     session = Session(halt_on_violation=False)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from acel.matchers import matching
 from acel.temporal import (
     at_most_n_times,
     at_most_total,
@@ -286,3 +287,88 @@ def test_rate_limit_reset_clears_history():
     c.reset()
     assert c.verdict is Verdict.UNKNOWN
     assert c.on_event("send_payment") is not Verdict.VIOLATED
+
+
+# --- content-aware matching (every template accepts a matcher, not just a plain name) --
+
+def test_must_precede_works_with_content_matchers():
+    """The flagship use case: a `git commit` Bash call must be preceded by
+    a test-running Bash call — both are the same tool name, distinguished
+    only by the command's content."""
+    test_run = matching("Bash", r"pytest|npm (run )?test")
+    commit = matching("Bash", r"git commit")
+    c = must_precede(test_run, commit)
+
+    calls = [
+        ("Bash", {"command": "git commit -m 'wip'"}),
+    ]
+    assert run_calls(c, calls) is Verdict.VIOLATED
+
+
+def test_must_precede_content_matchers_allow_when_test_ran_first():
+    test_run = matching("Bash", r"pytest|npm (run )?test")
+    commit = matching("Bash", r"git commit")
+    c = must_precede(test_run, commit)
+
+    calls = [
+        ("Bash", {"command": "pytest -q"}),
+        ("Bash", {"command": "git commit -m 'wip'"}),
+    ]
+    assert run_calls(c, calls) is not Verdict.VIOLATED
+
+
+def test_must_precede_content_matchers_ignore_unrelated_bash_calls():
+    """A Bash call that matches neither pattern (e.g. `ls`) shouldn't count
+    as either side of the contract."""
+    test_run = matching("Bash", r"pytest")
+    commit = matching("Bash", r"git commit")
+    c = must_precede(test_run, commit)
+
+    calls = [
+        ("Bash", {"command": "ls -la"}),
+        ("Bash", {"command": "git commit -m 'wip'"}),
+    ]
+    assert run_calls(c, calls) is Verdict.VIOLATED  # ls doesn't satisfy "test ran"
+
+
+def test_at_most_n_times_with_content_matcher_only_counts_matching_calls():
+    force_push = matching("Bash", r"git push .*--force")
+    c = at_most_n_times(force_push, n=1)
+
+    calls = [
+        ("Bash", {"command": "git push origin main"}),  # doesn't match, not counted
+        ("Bash", {"command": "git push --force origin main"}),  # 1st match
+    ]
+    assert run_calls(c, calls) is not Verdict.VIOLATED
+    assert c.on_event("Bash", {"command": "git push --force origin main"}) is Verdict.VIOLATED
+
+
+def test_matcher_field_defaults_to_command():
+    m = matching("Bash", "pytest")
+    assert m("Bash", {"command": "pytest -q"}) is True
+    assert m("Bash", {"command": "npm test"}) is False
+    assert m("Bash", {}) is False  # missing field -> no match, not an error
+
+
+def test_matcher_custom_field():
+    from acel.matchers import matching as m
+
+    env_write = m("Write", r"\.env$", field="file_path")
+    assert env_write("Write", {"file_path": "config/.env"}) is True
+    assert env_write("Write", {"file_path": "config/settings.py"}) is False
+
+
+def test_matcher_only_matches_its_own_tool_name():
+    test_run = matching("Bash", r"pytest")
+    assert test_run("PowerShell", {"command": "pytest -q"}) is False
+
+
+def test_matcher_case_insensitive():
+    m = matching("Bash", "GIT COMMIT")
+    assert m("Bash", {"command": "git commit -m 'x'"}) is True
+
+
+def test_matcher_spec_string_is_human_readable():
+    c = must_precede(matching("Bash", r"pytest"), matching("Bash", r"git commit"))
+    assert "Bash(command~/pytest/)" in c.spec
+    assert "Bash(command~/git commit/)" in c.spec
