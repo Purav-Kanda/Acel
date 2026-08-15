@@ -372,3 +372,18 @@ def test_matcher_spec_string_is_human_readable():
     c = must_precede(matching("Bash", r"pytest"), matching("Bash", r"git commit"))
     assert "Bash(command~/pytest/)" in c.spec
     assert "Bash(command~/git commit/)" in c.spec
+
+
+def test_at_most_n_times_zero_with_content_matcher_is_a_hard_block():
+    """A documented pattern: at_most_n_times(matcher, n=0) blocks a specific
+    dangerous call unconditionally on its very first occurrence — an
+    outright ban expressed with existing templates, no precondition needed."""
+    dangerous = matching("Bash", r"rm -rf")
+    c = at_most_n_times(dangerous, n=0)
+    assert c.on_event("Bash", {"command": "rm -rf /"}) is Verdict.VIOLATED
+
+
+def test_at_most_n_times_zero_hard_block_ignores_non_matching_calls():
+    dangerous = matching("Bash", r"rm -rf")
+    c = at_most_n_times(dangerous, n=0)
+    assert c.on_event("Bash", {"command": "ls -la"}) is not Verdict.VIOLATED

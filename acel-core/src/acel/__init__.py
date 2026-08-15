@@ -31,7 +31,7 @@ from .temporal import (
 from .verdict import Verdict
 from .violations import ContractViolation, Violation
 
-__version__ = "0.1.12"
+__version__ = "0.1.13"
 
 __all__ = [
     "__version__",

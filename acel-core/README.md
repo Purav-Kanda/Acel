@@ -160,6 +160,29 @@ session = Session(state={"authenticated": True, "current_tenant": "t_9"})
 session.register(search_database)
 ```
 
+A precondition can also inspect the *current call's own arguments*, not
+just accumulated session state — write `lambda s, args: ...` instead of
+`lambda s: ...` and ACEL detects the difference automatically (by
+inspecting the function's signature) and calls it the right way; the
+original 1-argument form keeps working exactly as before, no changes
+needed to anything already written this way:
+
+```python
+session.register_tool(
+    "run_shell",
+    precondition=lambda s, args: "rm -rf" not in args.get("command", ""),
+)
+```
+
+This is genuinely different from [content-aware temporal matching](#content-aware-matching-matching-on-what-a-call-actually-does):
+a temporal contract answers "did a call *matching this pattern* happen
+(possibly zero times allowed)", while a 2-argument precondition can run any
+logic at all over the specific call being gated right now — combine it
+with state, check multiple fields together, whatever the rule actually
+needs. The tradeoff is the same one preconditions have always had: this is
+Python-only, not expressible in a JSON/YAML rules file, for the same
+reason arbitrary logic never has been (see [Config-driven contracts](#config-driven-contracts-no-code-required)).
+
 ## Offline analysis / CI mode
 
 `Session.replay` runs a recorded trace and returns **every** violation without
@@ -288,13 +311,31 @@ file so the next invocation sees it.
    tool call with ACEL's reason attached, the same way any other permission
    denial does.
 
-**Scope, honestly:** content-aware matching (below) covers a lot, but it's
-still regex-on-one-field, not arbitrary logic — "block any `Bash` command
-containing `rm -rf`, unless it's inside `/tmp`" needs real conditional logic
-over the arguments, which is a precondition's job, and preconditions still
-only see session state, not the current call's args. That gap (argument-aware
-*preconditions*, as opposed to argument-aware temporal contracts, which
-this section already covers) remains a real, plausible future extension.
+**Unconditional bans work today too, declaratively.** `at_most_n_times(matcher, n=0)`
+blocks a specific dangerous call outright on its very first occurrence — a
+hard "this is never allowed" rule, expressed with an ordinary template, no
+Python required:
+
+```yaml
+contracts:
+  - template: at_most_n_times
+    args: [{tool: Bash, matches: "rm -rf"}]
+    kwargs: {n: 0}
+```
+
+**Scope, honestly:** that covers "ban this pattern outright," but it's
+still one regex against one field — "block `rm -rf` unless it's inside
+`/tmp`" needs real conditional logic, which is what
+[argument-aware preconditions](#prepostconditions-with-decorators) are for
+(`lambda s, args: ...`). Those work identically through this same hook
+pipeline when you wire the `Session` in Python — but preconditions have
+never been YAML-file-representable, for the same reason arbitrary code
+never is, so a `hook-pretooluse --rules foo.yaml` invocation specifically
+can't reach one; that path only builds temporal contracts from the file.
+If you need argument-aware preconditions with the hooks integration, build
+your own thin wrapper around `acel.hooks.pretooluse()`/`posttooluse()`
+that constructs the `Session` directly instead of going through
+`--rules`.
 
 See `acel.hooks` for the implementation and `acel hook-pretooluse --help` /
 `acel hook-posttooluse --help` for the CLI reference.

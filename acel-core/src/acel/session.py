@@ -198,7 +198,14 @@ class Session:
         postcondition: Postcondition | Check | list | None = None,
         commit: CommitFn | None = None,
     ) -> None:
-        """Attach pre/postconditions and a state-commit to a tool by name."""
+        """Attach pre/postconditions and a state-commit to a tool by name.
+
+        ``precondition`` may be ``lambda s: ...`` (state only, the common
+        case) or ``lambda s, args: ...`` to also inspect the current call's
+        arguments — e.g. ``lambda s, args: "rm -rf" not in args.get("command", "")``.
+        See ``acel.conditions`` for the full explanation of how the two
+        forms are told apart.
+        """
         self._tools[name] = ToolSpec(
             name=name,
             preconditions=_as_checks(precondition, post=False),
@@ -269,7 +276,7 @@ class Session:
             blocking_violation: Violation | None = None
             if spec is not None:
                 for check in spec.preconditions:
-                    if not check.evaluate(self.state):
+                    if not check.evaluate(self.state, args):
                         blocking_violation = self._record(
                             "precondition", check.description, tool, step, args, None
                         )
@@ -356,7 +363,7 @@ class Session:
 
             if spec is not None:
                 for check in spec.preconditions:
-                    if not check.evaluate(self.state):
+                    if not check.evaluate(self.state, args):
                         v = self._record("precondition", check.description, tool, step, args, None)
                         if self.metrics is not None:
                             self.metrics.record_gate_latency(time.perf_counter() - gate_start)
@@ -466,7 +473,7 @@ class Session:
             pre_failed = False
             if spec is not None:
                 for check in spec.preconditions:
-                    if not check.evaluate(self.state):
+                    if not check.evaluate(self.state, args):
                         found.append(self._record("precondition", check.description, event.tool, step, args, None))
                         pre_failed = True
                         break
